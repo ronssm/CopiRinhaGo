@@ -1,0 +1,56 @@
+version: '3.8'
+services:
+  backend1:
+    build: .
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: "175MB"
+    networks:
+      - payment-processor
+    environment:
+      - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
+  backend2:
+    build: .
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: "175MB"
+    networks:
+      - payment-processor
+    environment:
+      - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    ports:
+      - "9999:9999"
+    networks:
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          cpus: "0.15"
+          memory: "42MB"
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: copirinha
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - ./sql/ddl.sql:/docker-entrypoint-initdb.d/ddl.sql
+      - ./sql/dml.sql:/docker-entrypoint-initdb.d/dml.sql
+    networks:
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: "33MB"
+networks:
+  payment-processor:
+    external: true
