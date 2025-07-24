@@ -1,0 +1,18 @@
+# Ignorar arquivos e pastas desnecessários para build da imagem Docker
+.git
+.gitignore
+.vscode
+.idea
+*.swp
+*.swo
+*.log
+node_modules
+.env
+Dockerfile*
+docker-compose*
+README.md
+*.md
+*.test
+*.out
+*.exe
+vendor

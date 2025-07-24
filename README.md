@@ -34,12 +34,14 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 1. Instale Docker e Docker Compose.
 2. Clone este repositório:  
    `git clone https://github.com/ronssm/CopiRinhaGo`
-3. Suba os Payment Processors primeiro (veja instruções do desafio).
-4. Execute:
+3. O projeto já inclui um arquivo `.gitignore` para evitar que binários, arquivos temporários, dependências e configs locais sejam enviados ao repositório ou à submissão.
+4. O projeto também inclui um arquivo `.dockerignore` para garantir que arquivos desnecessários não sejam copiados para a imagem Docker durante o build, tornando a imagem mais leve e segura.
+5. Suba os Payment Processors primeiro (veja instruções do desafio).
+6. Execute:
    ```sh
    docker-compose up --build
    ```
-5. Acesse os endpoints via `http://localhost:9999`.
+7. Acesse os endpoints via `http://localhost:9999`.
 
 ## Conformidade com o Desafio
 
@@ -84,3 +86,6 @@ MIT
 - 2025-07-24 18:00: Estrutura Go corrigida, erros de build resolvidos, lógica de pagamento aprimorada
 - 2025-07-24 19:00: Validação de UUID, unicidade de correlationId, tratamento de erros de banco e limites de recursos aplicados
 - 2025-07-24 20:00: Dados do participante e links atualizados para submissão
+- 2025-07-24 20:15: Adicionado `.gitignore` para evitar envio de arquivos desnecessários ao repositório
+- 2025-07-24 20:20: Adicionado `.dockerignore` para garantir builds Docker limpos e seguros
+- 2025-07-24 20:30: Ajustes finais de documentação e instruções para submissão

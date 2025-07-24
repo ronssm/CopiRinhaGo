@@ -1,0 +1,33 @@
+# Go build
+/app
+*.exe
+*.out
+*.test
+
+# Dependency directories
+vendor/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+*.pid
+docker-compose.override.yml
+
+# Misc
+node_modules/
+.env
+
+# Go modules
+/go.sum
+/go.mod
