@@ -9,6 +9,7 @@ import (
     "CopiRinhaGo/db"
     "bytes"
     "errors"
+    "context"
 )
 
 type HealthStatus struct {
@@ -38,7 +39,15 @@ func getHealth(processor string) *HealthStatus {
     } else {
         url = "http://payment-processor-fallback:8080/payments/service-health"
     }
-    resp, err := http.Get(url)
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    if err != nil {
+        status.Failing = true
+        status.LastChecked = time.Now()
+        return status
+    }
+    resp, err := http.DefaultClient.Do(req)
     if err != nil {
         status.Failing = true
         status.LastChecked = time.Now()
@@ -76,6 +85,7 @@ func chooseProcessor() (string, error) {
 }
 
 func HandlePayment(w http.ResponseWriter, r *http.Request) {
+    // Validação do payload
     var req struct {
         CorrelationID string  `json:"correlationId"`
         Amount        float64 `json:"amount"`
@@ -84,8 +94,18 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "invalid request", http.StatusBadRequest)
         return
     }
+    // Valida se correlationId é UUID
     if req.CorrelationID == "" || req.Amount <= 0 {
         http.Error(w, "missing or invalid fields", http.StatusBadRequest)
+        return
+    }
+    if !isValidUUID(req.CorrelationID) {
+        http.Error(w, "correlationId must be a valid UUID", http.StatusBadRequest)
+        return
+    }
+    // Verifica unicidade do correlationId
+    if paymentExists(req.CorrelationID) {
+        http.Error(w, "correlationId already used", http.StatusConflict)
         return
     }
     processor, err := chooseProcessor()
@@ -105,13 +125,25 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         "requestedAt": time.Now().UTC().Format(time.RFC3339Nano),
     }
     body, _ := json.Marshal(payload)
-    resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    reqPost, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+    if err != nil {
+        http.Error(w, "Payment processor error", http.StatusServiceUnavailable)
+        return
+    }
+    reqPost.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(reqPost)
     if err != nil || resp.StatusCode >= 500 {
-        // Try fallback if default failed
+        // Tenta fallback se default falhar
         if processor == "default" {
             url = "http://payment-processor-fallback:8080/payments"
-            resp, err = http.Post(url, "application/json", bytes.NewReader(body))
-            processor = "fallback"
+            reqPost, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+            if err == nil {
+                reqPost.Header.Set("Content-Type", "application/json")
+                resp, err = http.DefaultClient.Do(reqPost)
+                processor = "fallback"
+            }
         }
     }
     if err != nil || resp.StatusCode >= 500 {
@@ -124,6 +156,41 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         Processor:     processor,
         RequestedAt:   payload["requestedAt"].(string),
     }
-    db.InsertPayment(payment)
+    // Insere pagamento e trata erro de banco
+    if err := db.InsertPayment(payment); err != nil {
+        http.Error(w, "DB error", http.StatusInternalServerError)
+        return
+    }
     w.WriteHeader(http.StatusCreated)
 }
+
+// Função para validar UUID
+func isValidUUID(u string) bool {
+    if len(u) != 36 {
+        return false
+    }
+    // Regex simples para UUID v4
+    for i, c := range u {
+        switch i {
+        case 8, 13, 18, 23:
+            if c != '-' {
+                return false
+            }
+        default:
+            if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+// Função para verificar se correlationId já existe
+func paymentExists(correlationId string) bool {
+    // Consulta simples no banco
+    row := db.DB.QueryRow("SELECT 1 FROM payments WHERE correlation_id = $1", correlationId)
+    var exists int
+    err := row.Scan(&exists)
+    return err == nil
+}
+

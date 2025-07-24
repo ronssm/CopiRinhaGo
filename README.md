@@ -4,58 +4,69 @@ Backend for Rinha de Backend 2025
 
 ## Recent Updates
 
-- Fixed Go file structure in `handlers/payments.go` (package declaration, removed stray code)
-- Resolved Docker build errors: 'expected package, found func' and 'syntax error: non-declaration statement outside function body'
-- Payment handler now includes robust health check and fallback logic
+- Validação de UUID e unicidade de `correlationId` no endpoint `POST /payments`
+- Tratamento de erros de banco e validação de tipos
+- Limites de CPU e memória adicionados para todos os serviços no `docker-compose.yml` (total ≤ 1.5 CPUs e 350MB)
+- Health-check e fallback conforme especificação
+- Dados do participante e links atualizados para submissão
 
 ## Overview
 
-This project implements a backend for the Rinha de Backend challenge, handling payment requests and providing payment summaries, with robust fallback and health-check logic.
+Este projeto implementa um backend para o desafio Rinha de Backend 2025, intermediando pagamentos e fornecendo resumo dos processamentos, com lógica robusta de fallback, health-check e conformidade total com as regras do desafio.
+
+**Participante:** Ronaldo Santana  
+**LinkedIn:** [ronaldo-santana](https://www.linkedin.com/in/ronaldo-santana/)  
+**Repositório:** [github.com/ronssm/CopiRinhaGo](https://github.com/ronssm/CopiRinhaGo)
 
 ## Architecture
 
-- **Language:** Go
-- **Database:** PostgreSQL
-- **Load Balancer:** Nginx
-- **Containerization:** Docker Compose
+- **Linguagem:** Go
+- **Banco de Dados:** PostgreSQL
+- **Balanceador de carga:** Nginx
+- **Conteinerização:** Docker Compose
+- **Limites de recursos:** 1.5 CPUs e 350MB de memória entre todos os serviços
 - **Endpoints:**
-  - `POST /payments`: Intermediates payment requests, chooses the best Payment Processor, handles fallback and records transactions.
-  - `GET /payments-summary`: Returns a summary of processed payments by processor, supporting optional `from`/`to` query params.
+  - `POST /payments`: Intermedia pagamentos, valida UUID e unicidade, escolhe o melhor Payment Processor, faz fallback e registra transações.
+  - `GET /payments-summary`: Retorna resumo dos pagamentos processados por processor, com suporte a filtros `from`/`to`.
 
 ## Setup
 
-1. Ensure Docker and Docker Compose are installed.
-2. Clone this repository.
-3. Start the Payment Processors (see challenge instructions).
-4. Run:
+1. Instale Docker e Docker Compose.
+2. Clone este repositório:  
+   `git clone https://github.com/ronssm/CopiRinhaGo`
+3. Suba os Payment Processors primeiro (veja instruções do desafio).
+4. Execute:
    ```sh
    docker-compose up --build
    ```
-5. Access endpoints via `http://localhost:9999`.
+5. Acesse os endpoints via `http://localhost:9999`.
 
-## Challenge Compliance
+## Conformidade com o Desafio
 
-- Two backend instances behind Nginx (load balanced).
-- Resource limits set in `docker-compose.yml`.
-- Uses the `payment-processor` network for integration.
-- No source code included in submission directory.
+- Duas instâncias do backend atrás do Nginx (balanceamento de carga)
+- Limites de recursos definidos em `docker-compose.yml` (CPU/memória)
+- Uso da rede `payment-processor` para integração
+- Não incluir código fonte/logs na submissão
+- Arquivos obrigatórios: `docker-compose.yml`, `info.json`, `README.md`, scripts SQL
 
-## Technologies
+## Tecnologias
 
 - Go
 - PostgreSQL
 - Nginx
 - Docker Compose
 
-## How it Works
+## Como funciona
 
-- Health-check endpoints are cached to avoid 429 errors.
-- Payments are routed to the default processor unless it is failing, then fallback is used.
-- All payments are recorded with processor info for accurate summaries.
+- O endpoint de health-check é cacheado por 5s para evitar erro 429
+- Pagamentos são sempre tentados no Default (menor taxa), com fallback automático
+- Todos os pagamentos são registrados com o processor usado para garantir consistência
+- Validação de UUID e unicidade de `correlationId` para evitar duplicidade
 
 ## Troubleshooting
 
-- If you see Go build errors about 'expected package' or 'syntax error', check that all `.go` files start with a package declaration and contain only valid Go code.
+- Se aparecer erro de build Go, verifique se todos os arquivos `.go` começam com declaração de package e código válido
+- Se aparecer erro de `correlationId already used`, significa que o UUID já foi processado
 
 ## License
 
@@ -63,11 +74,13 @@ MIT
 
 ## Changelog
 
-- 2025-07-24 14:00: Initial scaffold with payment model, handlers, DB logic, Docker Compose, Nginx, and SQL files
-- 2025-07-24 15:00: Added health-check caching, fallback logic, and summary endpoint
-- 2025-07-24 15:30: Cleaned up docker-compose.yml and nginx.conf for challenge compliance
-- 2025-07-24 16:00: Updated README with setup, architecture, and compliance details
-- 2025-07-24 16:30: Completed Dockerfile for Go backend
-- 2025-07-24 16:45: Removed duplicate code blocks from Go files and configs
-- 2025-07-24 17:00: Final review and compliance check for challenge submission
-- 2025-07-24 18:00: Fixed Go file structure in `handlers/payments.go`, resolved Docker build errors, improved payment handler logic
+- 2025-07-24 14:00: Estrutura inicial com modelo de pagamento, handlers, lógica de banco, Docker Compose, Nginx e SQL
+- 2025-07-24 15:00: Adicionado cache de health-check, fallback e endpoint de resumo
+- 2025-07-24 15:30: Limpeza de docker-compose.yml e nginx.conf para conformidade
+- 2025-07-24 16:00: Atualização do README com setup, arquitetura e detalhes de conformidade
+- 2025-07-24 16:30: Dockerfile finalizado para backend Go
+- 2025-07-24 16:45: Removido código duplicado dos arquivos Go e configs
+- 2025-07-24 17:00: Revisão final e checagem de conformidade para submissão
+- 2025-07-24 18:00: Estrutura Go corrigida, erros de build resolvidos, lógica de pagamento aprimorada
+- 2025-07-24 19:00: Validação de UUID, unicidade de correlationId, tratamento de erros de banco e limites de recursos aplicados
+- 2025-07-24 20:00: Dados do participante e links atualizados para submissão

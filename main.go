@@ -13,6 +13,7 @@ func main() {
     if connStr == "" {
         connStr = "postgres://user:password@db:5432/copirinha?sslmode=disable"
     }
+    log.Printf("Connecting to DB with: %s", connStr)
     if err := db.InitDB(connStr); err != nil {
         log.Fatalf("DB error: %v", err)
     }
