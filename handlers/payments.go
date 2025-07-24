@@ -84,6 +84,10 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "invalid request", http.StatusBadRequest)
         return
     }
+    if req.CorrelationID == "" || req.Amount <= 0 {
+        http.Error(w, "missing or invalid fields", http.StatusBadRequest)
+        return
+    }
     processor, err := chooseProcessor()
     if err != nil {
         http.Error(w, "No processors available", http.StatusServiceUnavailable)

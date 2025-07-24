@@ -2,6 +2,12 @@
 
 Backend for Rinha de Backend 2025
 
+## Recent Updates
+
+- Fixed Go file structure in `handlers/payments.go` (package declaration, removed stray code)
+- Resolved Docker build errors: 'expected package, found func' and 'syntax error: non-declaration statement outside function body'
+- Payment handler now includes robust health check and fallback logic
+
 ## Overview
 
 This project implements a backend for the Rinha de Backend challenge, handling payment requests and providing payment summaries, with robust fallback and health-check logic.
@@ -47,6 +53,10 @@ This project implements a backend for the Rinha de Backend challenge, handling p
 - Payments are routed to the default processor unless it is failing, then fallback is used.
 - All payments are recorded with processor info for accurate summaries.
 
+## Troubleshooting
+
+- If you see Go build errors about 'expected package' or 'syntax error', check that all `.go` files start with a package declaration and contain only valid Go code.
+
 ## License
 
 MIT
@@ -57,3 +67,7 @@ MIT
 - 2025-07-24 15:00: Added health-check caching, fallback logic, and summary endpoint
 - 2025-07-24 15:30: Cleaned up docker-compose.yml and nginx.conf for challenge compliance
 - 2025-07-24 16:00: Updated README with setup, architecture, and compliance details
+- 2025-07-24 16:30: Completed Dockerfile for Go backend
+- 2025-07-24 16:45: Removed duplicate code blocks from Go files and configs
+- 2025-07-24 17:00: Final review and compliance check for challenge submission
+- 2025-07-24 18:00: Fixed Go file structure in `handlers/payments.go`, resolved Docker build errors, improved payment handler logic
