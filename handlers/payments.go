@@ -10,6 +10,9 @@ import (
     "bytes"
     "errors"
     "context"
+    "log"
+    "os"
+    "strings"
 )
 
 type HealthStatus struct {
@@ -24,22 +27,33 @@ var (
         "fallback": &HealthStatus{LastChecked: time.Time{}},
     }
     healthMu sync.Mutex
+    logLevel string
+    paymentWorkerPool = make(chan struct{}, 32) // Limite de 32 goroutines
 )
 
 func getHealth(processor string) *HealthStatus {
+    if logLevel == "" {
+        logLevel = strings.ToUpper(os.Getenv("LOG_LEVEL"))
+        if logLevel == "" {
+            logLevel = "DEBUG"
+        }
+    }
     healthMu.Lock()
     defer healthMu.Unlock()
     status := healthCache[processor]
-    if time.Since(status.LastChecked) < 5*time.Second {
+    if time.Since(status.LastChecked) < 3*time.Second {
         return status
     }
     url := ""
     if processor == "default" {
+    if logLevel == "DEBUG" {
+        log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
+    }
         url = "http://payment-processor-default:8080/payments/service-health"
     } else {
         url = "http://payment-processor-fallback:8080/payments/service-health"
     }
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
     defer cancel()
     req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
     if err != nil {
@@ -53,9 +67,8 @@ func getHealth(processor string) *HealthStatus {
         status.LastChecked = time.Now()
         return status
     }
-    defer resp.Body.Close()
-    if resp.StatusCode == 429 {
-        return status
+    if logLevel == "DEBUG" {
+        log.Printf("[DEBUG][HEALTH] Cache hit para %s", processor)
     }
     var hs struct {
         Failing         bool `json:"failing"`
@@ -81,11 +94,20 @@ func chooseProcessor() (string, error) {
     if !fb.Failing {
         return "fallback", nil
     }
+    if logLevel == "DEBUG" {
+        log.Println("[DEBUG][FLOW] Escolhendo processor para pagamento...")
+    }
     return "", errors.New("all processors failing")
 }
 
 func HandlePayment(w http.ResponseWriter, r *http.Request) {
     // Validação do payload
+    if logLevel == "" {
+        logLevel = strings.ToUpper(os.Getenv("LOG_LEVEL"))
+        if logLevel == "" {
+            logLevel = "DEBUG"
+        }
+    }
     var req struct {
         CorrelationID string  `json:"correlationId"`
         Amount        float64 `json:"amount"`
@@ -156,12 +178,15 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         Processor:     processor,
         RequestedAt:   payload["requestedAt"].(string),
     }
-    // Insere pagamento e trata erro de banco
-    if err := db.InsertPayment(payment); err != nil {
-        http.Error(w, "DB error", http.StatusInternalServerError)
-        return
-    }
-    w.WriteHeader(http.StatusCreated)
+    // Processa pagamento em goroutine para não bloquear o handler
+    go func(payment *models.Payment) {
+        if err := db.InsertPayment(payment); err != nil {
+            log.Printf("[ERROR][PAYMENT] Falha ao inserir pagamento: %v", err)
+        } else if logLevel == "DEBUG" {
+            log.Println("[DEBUG][PAYMENT] Pagamento processado com sucesso.")
+        }
+    }(payment)
+    w.WriteHeader(http.StatusAccepted)
 }
 
 // Função para validar UUID

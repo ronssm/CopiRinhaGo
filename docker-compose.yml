@@ -3,6 +3,7 @@ services:
     build: .
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
+      - LOG_LEVEL=DEBUG
     networks:
       - backend
       - payment-processor
@@ -17,12 +18,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.65"
+          cpus: "0.45"
           memory: "110MB"
   backend2:
     build: .
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
+      - LOG_LEVEL=DEBUG
     networks:
       - backend
       - payment-processor
@@ -37,7 +39,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.65"
+          cpus: "0.45"
           memory: "110MB"
   nginx:
     image: nginx:latest
@@ -51,7 +53,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.1"
+          cpus: "0.05"
           memory: "20MB"
   db:
     image: postgres:15
@@ -59,6 +61,7 @@ services:
       - POSTGRES_DB=copirinha
       - POSTGRES_USER=user
       - POSTGRES_PASSWORD=password
+      - LOG_LEVEL=DEBUG
     volumes:
       - ./sql/ddl.sql:/docker-entrypoint-initdb.d/ddl.sql
       - ./sql/dml.sql:/docker-entrypoint-initdb.d/dml.sql
@@ -72,7 +75,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.1"
+          cpus: "0.35"
           memory: "110MB"
 networks:
   backend:

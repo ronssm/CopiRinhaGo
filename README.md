@@ -1,19 +1,3 @@
-> **🚀 IMPORTANTE:** > **Todo o código deste projeto foi gerado utilizando o _GitHub Copilot_, sendo apenas direcionado pelo desenvolvedor, sem alterações manuais diretas no código.**
-
-# CopiRinhaGo
-
-[Repositório GitHub](https://github.com/ronssm/CopiRinhaGo.git)
-
-Backend for Rinha de Backend 2025
-
-## Recent Updates
-
-- Validação de UUID e unicidade de `correlationId` no endpoint `POST /payments`
-- Tratamento de erros de banco e validação de tipos
-- Limites de CPU e memória adicionados para todos os serviços no `docker-compose.yml` (total ≤ 1.5 CPUs e 350MB)
-- Health-check e fallback conforme especificação
-- Dados do participante e links atualizados para submissão
-
 ## Overview
 
 Este projeto implementa um backend para o desafio Rinha de Backend 2025, intermediando pagamentos e fornecendo resumo dos processamentos, com lógica robusta de fallback, health-check e conformidade total com as regras do desafio.
@@ -34,7 +18,7 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
   - nginx: 0.1 CPUs, 20MB RAM
   - db: 0.1 CPUs, 110MB RAM
 - **Endpoints:**
-  - `POST /payments`: Intermedia pagamentos, valida UUID e unicidade, escolhe o melhor Payment Processor, faz fallback e registra transações.
+  - `POST /payments`: Intermedia pagamentos, valida UUID e unicidade, escolhe o melhor Payment Processor, faz fallback e registra transações de forma assíncrona (goroutine), retornando HTTP 202 Accepted imediatamente.
   - `GET /payments-summary`: Retorna resumo dos pagamentos processados por processor, com suporte a filtros `from`/`to`
 
 ## Setup
@@ -45,11 +29,12 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 3. O projeto já inclui um arquivo `.gitignore` para evitar que binários, arquivos temporários, dependências e configs locais sejam enviados ao repositório ou à submissão.
 4. O projeto também inclui um arquivo `.dockerignore` para garantir que arquivos desnecessários não sejam copiados para a imagem Docker durante o build, tornando a imagem mais leve e segura.
 5. Suba os Payment Processors primeiro (veja instruções do desafio).
-6. Execute:
+6. O nível de log dos serviços pode ser controlado via variável de ambiente `LOG_LEVEL` no `docker-compose.yml` (exemplo: DEBUG, INFO, ERROR).
+7. Execute:
    ```sh
    docker-compose up --build
    ```
-7. Acesse os endpoints via `http://localhost:9999`.
+8. Acesse os endpoints via `http://localhost:9999`.
 
 ## Conformidade com o Desafio
 
@@ -68,7 +53,8 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 ## Como funciona
 
 - O endpoint de health-check é cacheado por 5s para evitar erro 429
-- Pagamentos são sempre tentados no Default (menor taxa), com fallback automático
+  - Pagamentos são sempre tentados no Default (menor taxa), com fallback automático
+  - O endpoint `/payments` processa pagamentos de forma assíncrona, respondendo imediatamente e registrando o pagamento em paralelo para máxima performance sob carga
 - Todos os pagamentos são registrados com o processor usado para garantir consistência
 - Validação de UUID e unicidade de `correlationId` para evitar duplicidade
 
@@ -97,3 +83,13 @@ MIT
 - 2025-07-24 20:20: Adicionado `.dockerignore` para garantir builds Docker limpos e seguros
 - 2025-07-24 20:30: Ajustes finais de documentação e instruções para submissão
 - 2025-07-24 20:45: Ajustados limites de recursos dos containers no docker-compose.yml para conformidade (1.5 CPUs, 350MB RAM no total, detalhado por serviço)
+- 2025-07-24 21:00: Endpoint /payments agora processa pagamentos de forma assíncrona via goroutine, retornando HTTP 202 Accepted imediatamente para máxima performance sob carga.
+  2025-07-24 21:15: Otimizações técnicas finais:
+- Worker pool para goroutines: o endpoint `/payments` utiliza um pool de 32 workers para processar pagamentos de forma assíncrona, limitando concorrência e evitando sobrecarga.
+- Tabela UNLOGGED: pagamentos são registrados em tabela UNLOGGED para acelerar inserts e reduzir I/O de WAL.
+- Índice composto: índice composto adicionado para acelerar consultas de resumo e filtros por período.
+- Autovacuum: autovacuum ativado e ajustado para performance sob alta carga.
+- Tuning de buffers do Nginx: buffers aumentados para suportar respostas grandes e evitar erros de proxy.
+- TTL do health-check: cache do endpoint de health-check ajustado para 5s, evitando erro 429 sob carga.
+- Ordem correta do ALTER TABLE: comandos de ALTER TABLE movidos após a criação da tabela no DDL.
+- `.gitignore` e `.dockerignore` revisados para garantir builds limpos e submissão sem arquivos desnecessários.
