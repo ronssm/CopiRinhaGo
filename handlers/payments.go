@@ -28,7 +28,6 @@ var (
     }
     healthMu sync.Mutex
     logLevel string
-    paymentWorkerPool = make(chan struct{}, 32) // Limite de 32 goroutines
 )
 
 func getHealth(processor string) *HealthStatus {
@@ -125,11 +124,7 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "correlationId must be a valid UUID", http.StatusBadRequest)
         return
     }
-    // Verifica unicidade do correlationId
-    if paymentExists(req.CorrelationID) {
-        http.Error(w, "correlationId already used", http.StatusConflict)
-        return
-    }
+    // Não verifica unicidade antes do insert, banco já garante
     processor, err := chooseProcessor()
     if err != nil {
         http.Error(w, "No processors available", http.StatusServiceUnavailable)
@@ -178,14 +173,20 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         Processor:     processor,
         RequestedAt:   payload["requestedAt"].(string),
     }
-    // Processa pagamento em goroutine para não bloquear o handler
-    go func(payment *models.Payment) {
-        if err := db.InsertPayment(payment); err != nil {
-            log.Printf("[ERROR][PAYMENT] Falha ao inserir pagamento: %v", err)
-        } else if logLevel == "DEBUG" {
-            log.Println("[DEBUG][PAYMENT] Pagamento processado com sucesso.")
+    // Tenta inserir pagamento de forma síncrona para tratar erro de unicidade
+    err = db.InsertPayment(payment)
+    if err != nil {
+        if errors.Is(err, db.ErrCorrelationIDExists) {
+            http.Error(w, "correlationId already used", http.StatusConflict)
+            return
         }
-    }(payment)
+        log.Printf("[ERROR][PAYMENT] Falha ao inserir pagamento: %v", err)
+        http.Error(w, "Erro ao registrar pagamento", http.StatusInternalServerError)
+        return
+    }
+    if logLevel == "DEBUG" {
+        log.Println("[DEBUG][PAYMENT] Pagamento processado com sucesso.")
+    }
     w.WriteHeader(http.StatusAccepted)
 }
 
@@ -210,12 +211,5 @@ func isValidUUID(u string) bool {
     return true
 }
 
-// Função para verificar se correlationId já existe
-func paymentExists(correlationId string) bool {
-    // Consulta simples no banco
-    row := db.DB.QueryRow("SELECT 1 FROM payments WHERE correlation_id = $1", correlationId)
-    var exists int
-    err := row.Scan(&exists)
-    return err == nil
-}
+// Removido: unicidade garantida pelo banco
 

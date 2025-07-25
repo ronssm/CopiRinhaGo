@@ -7,16 +7,13 @@ import (
     "log"
     "os"
     "strings"
+    "errors"
+    "strconv"
 )
 
 var (
     DB *sql.DB
     logLevel string
-    summaryCache struct {
-        data map[string]PaymentSummary
-        expiresAt int64
-        from, to string
-    }
 )
 
 func InitDB(connStr string) error {
@@ -30,9 +27,9 @@ func InitDB(connStr string) error {
         log.Printf("[ERROR][DB] Falha ao abrir conexão: %v", err)
         return err
     }
-    // Otimização do pool de conexões
-    DB.SetMaxOpenConns(50)
-    DB.SetMaxIdleConns(25)
+    // Otimização do pool de conexões (ajustado para refletir o log)
+    DB.SetMaxOpenConns(10)
+    DB.SetMaxIdleConns(5)
     DB.SetConnMaxLifetime(300000000000) // 5 minutos
     log.Println("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=10, MaxIdleConns=5, MaxLifetime=5min.")
     log.Println("[DEBUG][DB] Conexão aberta, testando ping...")
@@ -44,44 +41,55 @@ func InitDB(connStr string) error {
     return nil
 }
 
+// Insere um pagamento na tabela, garantindo unicidade de correlationId
 func InsertPayment(p *models.Payment) error {
     if logLevel == "DEBUG" {
         log.Printf("[DEBUG][DB] Inserindo pagamento: correlationId=%s, amount=%.2f, processor=%s, requestedAt=%s", p.CorrelationID, p.Amount, p.Processor, p.RequestedAt)
     }
-    stmt, err := DB.Prepare(`INSERT INTO payments (correlation_id, amount, processor, requested_at) VALUES ($1, $2, $3, $4)`)
+    _, err := DB.Exec(`INSERT INTO payments (correlation_id, amount, processor, requested_at) VALUES ($1, $2, $3, $4)`,
+        p.CorrelationID, p.Amount, p.Processor, p.RequestedAt)
     if err != nil {
-        log.Printf("[ERROR][DB] Falha ao preparar statement: %v", err)
+        // Trata erro de violação de unicidade
+        if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+            log.Printf("[ERROR][DB] correlationId já existe: %v", err)
+            return ErrCorrelationIDExists
+        }
+        log.Printf("[ERROR][DB] Falha ao inserir pagamento: %v", err)
         return err
     }
-    defer stmt.Close()
-    _, err = stmt.Exec(p.CorrelationID, p.Amount, p.Processor, p.RequestedAt)
-    if err != nil {
-        log.Printf("[ERROR][DB] Falha ao inserir pagamento: %v", err)
-    } else if logLevel == "DEBUG" {
+    if logLevel == "DEBUG" {
         log.Println("[DEBUG][DB] Pagamento inserido com sucesso.")
     }
-    return err
+    return nil
 }
+
+// Erro customizado para violação de unicidade
+var ErrCorrelationIDExists = errors.New("correlationId já existe")
 
 type PaymentSummary struct {
     TotalRequests int     `json:"totalRequests"`
     TotalAmount   float64 `json:"totalAmount"`
 }
 
+// Retorna o resumo dos pagamentos agrupados por processor, com filtros opcionais de data
 func GetPaymentsSummary(from, to string) (map[string]PaymentSummary, error) {
     if logLevel == "DEBUG" {
         log.Printf("[DEBUG][DB] Gerando resumo de pagamentos. Filtros: from=%s, to=%s", from, to)
     }
     result := map[string]PaymentSummary{"default": {}, "fallback": {}}
-    query := `SELECT processor, COUNT(*), COALESCE(SUM(amount),0) FROM payments WHERE 1=1`
+    query := `SELECT processor, COUNT(*), COALESCE(SUM(amount),0) FROM payments`
     args := []interface{}{}
+    conds := []string{}
     if from != "" {
-        query += " AND requested_at >= $1"
+        conds = append(conds, "requested_at >= $"+strconv.Itoa(len(args)+1))
         args = append(args, from)
     }
     if to != "" {
-        query += " AND requested_at <= $2"
+        conds = append(conds, "requested_at <= $"+strconv.Itoa(len(args)+1))
         args = append(args, to)
+    }
+    if len(conds) > 0 {
+        query += " WHERE " + strings.Join(conds, " AND ")
     }
     query += " GROUP BY processor"
     if logLevel == "DEBUG" {
@@ -99,15 +107,31 @@ func GetPaymentsSummary(from, to string) (map[string]PaymentSummary, error) {
         var total float64
         if err := rows.Scan(&proc, &count, &total); err != nil {
             log.Printf("[ERROR][DB] Falha ao ler linha do resumo: %v", err)
-    summaryCache.data = result
-    summaryCache.expiresAt = now + 2
+            continue
+        }
         if logLevel == "DEBUG" {
             log.Printf("[DEBUG][DB] Resumo: processor=%s, totalRequests=%d, totalAmount=%.2f", proc, count, total)
         }
-        result[proc] = PaymentSummary{TotalRequests: count, TotalAmount: total}
+        // Garante que só "default" ou "fallback" sejam aceitos
+        if proc == "default" || proc == "fallback" {
+            result[proc] = PaymentSummary{TotalRequests: count, TotalAmount: total}
+        }
     }
     if logLevel == "DEBUG" {
         log.Println("[DEBUG][DB] Resumo de pagamentos gerado.")
     }
     return result, nil
+}
+
+// Reseta a tabela de pagamentos (truncate)
+func ResetPayments() error {
+    _, err := DB.Exec("TRUNCATE TABLE payments")
+    if err != nil {
+        log.Printf("[ERROR][DB] Falha ao resetar pagamentos: %v", err)
+        return err
+    }
+    if logLevel == "DEBUG" {
+        log.Println("[DEBUG][DB] Pagamentos resetados com sucesso.")
+    }
+    return nil
 }

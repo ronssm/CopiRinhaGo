@@ -18,7 +18,7 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
   - nginx: 0.1 CPUs, 20MB RAM
   - db: 0.1 CPUs, 110MB RAM
 - **Endpoints:**
-  - `POST /payments`: Intermedia pagamentos, valida UUID e unicidade, escolhe o melhor Payment Processor, faz fallback e registra transações de forma assíncrona (goroutine), retornando HTTP 202 Accepted imediatamente.
+  - `POST /payments`: Intermedia pagamentos, valida UUID, escolhe o melhor Payment Processor, faz fallback e registra transações de forma síncrona, retornando HTTP 202 Accepted apenas após persistência garantida. Unicidade de `correlationId` é garantida exclusivamente pelo banco de dados.
   - `GET /payments-summary`: Retorna resumo dos pagamentos processados por processor, com suporte a filtros `from`/`to`
 
 ## Setup
@@ -54,9 +54,10 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 
 - O endpoint de health-check é cacheado por 5s para evitar erro 429
   - Pagamentos são sempre tentados no Default (menor taxa), com fallback automático
-  - O endpoint `/payments` processa pagamentos de forma assíncrona, respondendo imediatamente e registrando o pagamento em paralelo para máxima performance sob carga
+- O endpoint `/payments` processa pagamentos de forma síncrona, respondendo apenas após persistência garantida, para máxima consistência e performance sob carga
 - Todos os pagamentos são registrados com o processor usado para garantir consistência
-- Validação de UUID e unicidade de `correlationId` para evitar duplicidade
+- Validação de UUID para evitar duplicidade
+- Unicidade de `correlationId` garantida apenas pelo banco de dados (sem consulta prévia)
 
 ## Troubleshooting
 

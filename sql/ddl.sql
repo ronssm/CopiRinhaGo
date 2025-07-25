@@ -12,3 +12,5 @@ CREATE INDEX IF NOT EXISTS idx_requested_at ON payments(requested_at);
 CREATE INDEX IF NOT EXISTS idx_correlation_processor ON payments(correlation_id, processor);
 -- Garante autovacuum ativo
 ALTER TABLE payments SET (autovacuum_enabled = true);
+-- Garante unicidade do correlation_id
+ALTER TABLE payments ADD CONSTRAINT unique_correlation_id UNIQUE (correlation_id);

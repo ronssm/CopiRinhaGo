@@ -32,5 +32,6 @@ func HandlePaymentsSummary(w http.ResponseWriter, r *http.Request) {
         log.Println("[DEBUG][API] Resumo obtido, enviando resposta.")
     }
     w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(summary)
 }
