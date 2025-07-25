@@ -1,4 +1,8 @@
+> **🚀 IMPORTANTE:** > **Todo o código deste projeto foi gerado utilizando o _GitHub Copilot_, sendo apenas direcionado pelo desenvolvedor, sem alterações manuais diretas no código.**
+
 # CopiRinhaGo
+
+[Repositório GitHub](https://github.com/ronssm/CopiRinhaGo.git)
 
 Backend for Rinha de Backend 2025
 
@@ -25,9 +29,13 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 - **Balanceador de carga:** Nginx
 - **Conteinerização:** Docker Compose
 - **Limites de recursos:** 1.5 CPUs e 350MB de memória entre todos os serviços
+  - backend1: 0.65 CPUs, 110MB RAM
+  - backend2: 0.65 CPUs, 110MB RAM
+  - nginx: 0.1 CPUs, 20MB RAM
+  - db: 0.1 CPUs, 110MB RAM
 - **Endpoints:**
   - `POST /payments`: Intermedia pagamentos, valida UUID e unicidade, escolhe o melhor Payment Processor, faz fallback e registra transações.
-  - `GET /payments-summary`: Retorna resumo dos pagamentos processados por processor, com suporte a filtros `from`/`to`.
+  - `GET /payments-summary`: Retorna resumo dos pagamentos processados por processor, com suporte a filtros `from`/`to`
 
 ## Setup
 
@@ -46,7 +54,6 @@ Este projeto implementa um backend para o desafio Rinha de Backend 2025, interme
 ## Conformidade com o Desafio
 
 - Duas instâncias do backend atrás do Nginx (balanceamento de carga)
-- Limites de recursos definidos em `docker-compose.yml` (CPU/memória)
 - Uso da rede `payment-processor` para integração
 - Não incluir código fonte/logs na submissão
 - Arquivos obrigatórios: `docker-compose.yml`, `info.json`, `README.md`, scripts SQL
@@ -89,3 +96,4 @@ MIT
 - 2025-07-24 20:15: Adicionado `.gitignore` para evitar envio de arquivos desnecessários ao repositório
 - 2025-07-24 20:20: Adicionado `.dockerignore` para garantir builds Docker limpos e seguros
 - 2025-07-24 20:30: Ajustes finais de documentação e instruções para submissão
+- 2025-07-24 20:45: Ajustados limites de recursos dos containers no docker-compose.yml para conformidade (1.5 CPUs, 350MB RAM no total, detalhado por serviço)

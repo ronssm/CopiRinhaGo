@@ -4,6 +4,7 @@ services:
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
     networks:
+      - backend
       - payment-processor
     depends_on:
       db:
@@ -16,13 +17,14 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.7"
-          memory: "120MB"
+          cpus: "0.65"
+          memory: "110MB"
   backend2:
     build: .
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
     networks:
+      - backend
       - payment-processor
     depends_on:
       db:
@@ -35,8 +37,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.7"
-          memory: "120MB"
+          cpus: "0.65"
+          memory: "110MB"
   nginx:
     image: nginx:latest
     volumes:
@@ -44,13 +46,13 @@ services:
     ports:
       - "9999:9999"
     networks:
-      - payment-processor
+      - backend
     restart: always
     deploy:
       resources:
         limits:
           cpus: "0.1"
-          memory: "30MB"
+          memory: "20MB"
   db:
     image: postgres:15
     environment:
@@ -61,7 +63,7 @@ services:
       - ./sql/ddl.sql:/docker-entrypoint-initdb.d/ddl.sql
       - ./sql/dml.sql:/docker-entrypoint-initdb.d/dml.sql
     networks:
-      - payment-processor
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d copirinha"]
       interval: 5s
@@ -70,8 +72,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: "80MB"
+          cpus: "0.1"
+          memory: "110MB"
 networks:
+  backend:
+    driver: bridge
   payment-processor:
     external: true
