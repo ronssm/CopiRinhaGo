@@ -1,3 +1,5 @@
+
+
 package handlers
 
 import (
@@ -14,6 +16,15 @@ import (
     "os"
     "strings"
 )
+
+var httpClient = &http.Client{
+    Transport: &http.Transport{
+        MaxIdleConns:        100,
+        MaxIdleConnsPerHost: 100,
+        IdleConnTimeout:     90 * time.Second,
+    },
+    Timeout: 2 * time.Second,
+}
 
 type HealthStatus struct {
     Failing         bool
@@ -60,7 +71,7 @@ func getHealth(processor string) *HealthStatus {
         status.LastChecked = time.Now()
         return status
     }
-    resp, err := http.DefaultClient.Do(req)
+    resp, err := httpClient.Do(req)
     if err != nil {
         status.Failing = true
         status.LastChecked = time.Now()
@@ -150,7 +161,7 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         return
     }
     reqPost.Header.Set("Content-Type", "application/json")
-    resp, err := http.DefaultClient.Do(reqPost)
+    resp, err := httpClient.Do(reqPost)
     if err != nil || resp.StatusCode >= 500 {
         // Tenta fallback se default falhar
         if processor == "default" {
@@ -158,7 +169,7 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
             reqPost, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
             if err == nil {
                 reqPost.Header.Set("Content-Type", "application/json")
-                resp, err = http.DefaultClient.Do(reqPost)
+                resp, err = httpClient.Do(reqPost)
                 processor = "fallback"
             }
         }

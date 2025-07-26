@@ -28,8 +28,8 @@ func InitDB(connStr string) error {
         return err
     }
     // Otimização do pool de conexões (ajustado para refletir o log)
-    DB.SetMaxOpenConns(10)
-    DB.SetMaxIdleConns(5)
+    DB.SetMaxOpenConns(30)
+    DB.SetMaxIdleConns(15)
     DB.SetConnMaxLifetime(300000000000) // 5 minutos
     log.Println("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=10, MaxIdleConns=5, MaxLifetime=5min.")
     log.Println("[DEBUG][DB] Conexão aberta, testando ping...")

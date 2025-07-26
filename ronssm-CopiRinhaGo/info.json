@@ -1,0 +1,18 @@
+{
+    "name": "Ronaldo Santana",
+    "social": [
+        "https://www.linkedin.com/in/ronaldo-santana/"
+    ],
+    "source-code-repo": "https://github.com/ronssm/CopiRinhaGo",
+    "langs": [
+        "go"
+    ],
+    "storages": [
+        "postgresql"
+    ],
+    "messaging": [],
+    "load-balancers": [
+        "nginx"
+    ],
+    "other-technologies": []
+}
