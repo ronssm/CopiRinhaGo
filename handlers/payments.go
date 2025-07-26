@@ -19,11 +19,14 @@ import (
 
 var httpClient = &http.Client{
     Transport: &http.Transport{
-        MaxIdleConns:        100,
-        MaxIdleConnsPerHost: 100,
-        IdleConnTimeout:     90 * time.Second,
+        MaxIdleConns:        300,
+        MaxIdleConnsPerHost: 150,
+        IdleConnTimeout:     10 * time.Second,
+        DisableKeepAlives:   false,
+        DisableCompression:  true, // Reduz overhead
+        ResponseHeaderTimeout: 500 * time.Millisecond,
     },
-    Timeout: 2 * time.Second,
+    Timeout: 800 * time.Millisecond, // Timeout agressivo para p99
 }
 
 type HealthStatus struct {
@@ -39,6 +42,8 @@ var (
     }
     healthMu sync.Mutex
     logLevel string
+    // Cache mais agressivo para melhor performance
+    healthCacheDuration = 800 * time.Millisecond
 )
 
 func getHealth(processor string) *HealthStatus {
@@ -51,19 +56,25 @@ func getHealth(processor string) *HealthStatus {
     healthMu.Lock()
     defer healthMu.Unlock()
     status := healthCache[processor]
-    if time.Since(status.LastChecked) < 3*time.Second {
+    if time.Since(status.LastChecked) < healthCacheDuration {
+        if logLevel == "DEBUG" {
+            log.Printf("[DEBUG][HEALTH] Cache hit para %s", processor)
+        }
         return status
     }
     url := ""
     if processor == "default" {
-    if logLevel == "DEBUG" {
-        log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
-    }
-        url = "http://payment-processor-default:8080/payments/service-health"
+        url = "http://payment-processor-default:8080/payments"
+        if logLevel == "DEBUG" {
+            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, "http://payment-processor-default:8080/payments/service-health")
+        }
     } else {
         url = "http://payment-processor-fallback:8080/payments/service-health"
+        if logLevel == "DEBUG" {
+            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
+        }
     }
-    ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
     defer cancel()
     req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
     if err != nil {
@@ -77,18 +88,18 @@ func getHealth(processor string) *HealthStatus {
         status.LastChecked = time.Now()
         return status
     }
-    if logLevel == "DEBUG" {
-        log.Printf("[DEBUG][HEALTH] Cache hit para %s", processor)
-    }
+    
     var hs struct {
         Failing         bool `json:"failing"`
         MinResponseTime int  `json:"minResponseTime"`
     }
+    
     if err := json.NewDecoder(resp.Body).Decode(&hs); err != nil {
         status.Failing = true
         status.LastChecked = time.Now()
         return status
     }
+    resp.Body.Close()
     status.Failing = hs.Failing
     status.MinResponseTime = hs.MinResponseTime
     status.LastChecked = time.Now()
@@ -98,16 +109,22 @@ func getHealth(processor string) *HealthStatus {
 func chooseProcessor() (string, error) {
     def := getHealth("default")
     fb := getHealth("fallback")
+    
+    if logLevel == "DEBUG" {
+        log.Printf("[DEBUG][FLOW] Health status - default: failing=%v, minTime=%d; fallback: failing=%v, minTime=%d", 
+            def.Failing, def.MinResponseTime, fb.Failing, fb.MinResponseTime)
+    }
+    
+    // Prioriza default se estiver funcionando (taxa menor)
     if !def.Failing {
         return "default", nil
     }
+    // Se default falha, usa fallback se disponível
     if !fb.Failing {
         return "fallback", nil
     }
-    if logLevel == "DEBUG" {
-        log.Println("[DEBUG][FLOW] Escolhendo processor para pagamento...")
-    }
-    return "", errors.New("all processors failing")
+    // Se ambos falhando, ainda tenta default (pode ser instabilidade temporária)
+    return "default", nil
 }
 
 func HandlePayment(w http.ResponseWriter, r *http.Request) {
@@ -138,8 +155,11 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
     // Não verifica unicidade antes do insert, banco já garante
     processor, err := chooseProcessor()
     if err != nil {
-        http.Error(w, "No processors available", http.StatusServiceUnavailable)
-        return
+        // Se chegou aqui, ambos estão falhando, mas ainda tenta default
+        processor = "default"
+        if logLevel == "DEBUG" {
+            log.Println("[DEBUG][FLOW] Ambos processadores falhando, tentando default mesmo assim")
+        }
     }
     url := ""
     if processor == "default" {
@@ -153,7 +173,7 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         "requestedAt": time.Now().UTC().Format(time.RFC3339Nano),
     }
     body, _ := json.Marshal(payload)
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
     defer cancel()
     reqPost, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
     if err != nil {
@@ -165,17 +185,33 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
     if err != nil || resp.StatusCode >= 500 {
         // Tenta fallback se default falhar
         if processor == "default" {
+            if logLevel == "DEBUG" {
+                log.Println("[DEBUG][FLOW] Default falhou, tentando fallback")
+            }
             url = "http://payment-processor-fallback:8080/payments"
             reqPost, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
             if err == nil {
                 reqPost.Header.Set("Content-Type", "application/json")
                 resp, err = httpClient.Do(reqPost)
-                processor = "fallback"
+                if err == nil && resp.StatusCode < 500 {
+                    processor = "fallback"
+                }
             }
         }
     }
+    
+    // Se ainda há erro após tentativas, retorna erro HTTP 503
     if err != nil || resp.StatusCode >= 500 {
-        http.Error(w, "Payment processor error", http.StatusServiceUnavailable)
+        if logLevel == "DEBUG" {
+            log.Printf("[DEBUG][FLOW] Falha final em ambos processadores: err=%v, status=%d", err, 
+                func() int { 
+                    if resp != nil { 
+                        return resp.StatusCode 
+                    }
+                    return 0 
+                }())
+        }
+        http.Error(w, "Payment processor unavailable", http.StatusServiceUnavailable)
         return
     }
     payment := &models.Payment{

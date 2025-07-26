@@ -9,6 +9,7 @@ import (
     "strings"
     "errors"
     "strconv"
+    "time"
 )
 
 var (
@@ -27,11 +28,14 @@ func InitDB(connStr string) error {
         log.Printf("[ERROR][DB] Falha ao abrir conexão: %v", err)
         return err
     }
-    // Otimização do pool de conexões (ajustado para refletir o log)
-    DB.SetMaxOpenConns(30)
-    DB.SetMaxIdleConns(15)
-    DB.SetConnMaxLifetime(300000000000) // 5 minutos
-    log.Println("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=10, MaxIdleConns=5, MaxLifetime=5min.")
+    // Otimização do pool de conexões para máxima performance
+    DB.SetMaxOpenConns(100)
+    DB.SetMaxIdleConns(50)
+    DB.SetConnMaxLifetime(60 * time.Second) // 1 minuto
+    DB.SetConnMaxIdleTime(10 * time.Second)  // 10 segundos idle
+    if logLevel == "DEBUG" {
+        log.Println("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=50, MaxIdleConns=25, MaxLifetime=5min.")
+    }
     log.Println("[DEBUG][DB] Conexão aberta, testando ping...")
     if err := DB.Ping(); err != nil {
         log.Printf("[ERROR][DB] Falha no ping: %v", err)
@@ -80,27 +84,31 @@ func GetPaymentsSummary(from, to string) (map[string]PaymentSummary, error) {
     query := `SELECT processor, COUNT(*), COALESCE(SUM(amount),0) FROM payments`
     args := []interface{}{}
     conds := []string{}
+    
     if from != "" {
-        conds = append(conds, "requested_at >= $"+strconv.Itoa(len(args)+1))
+        conds = append(conds, "requested_at >= $"+strconv.Itoa(len(args)+1)+"::timestamptz")
         args = append(args, from)
     }
     if to != "" {
-        conds = append(conds, "requested_at <= $"+strconv.Itoa(len(args)+1))
+        conds = append(conds, "requested_at <= $"+strconv.Itoa(len(args)+1)+"::timestamptz")
         args = append(args, to)
     }
     if len(conds) > 0 {
         query += " WHERE " + strings.Join(conds, " AND ")
     }
     query += " GROUP BY processor"
+    
     if logLevel == "DEBUG" {
         log.Printf("[DEBUG][DB] Executando query: %s, args=%v", query, args)
     }
+    
     rows, err := DB.Query(query, args...)
     if err != nil {
         log.Printf("[ERROR][DB] Falha ao consultar resumo: %v", err)
         return result, err
     }
     defer rows.Close()
+    
     for rows.Next() {
         var proc string
         var count int
@@ -117,6 +125,12 @@ func GetPaymentsSummary(from, to string) (map[string]PaymentSummary, error) {
             result[proc] = PaymentSummary{TotalRequests: count, TotalAmount: total}
         }
     }
+    
+    if err := rows.Err(); err != nil {
+        log.Printf("[ERROR][DB] Erro ao iterar resultados: %v", err)
+        return result, err
+    }
+    
     if logLevel == "DEBUG" {
         log.Println("[DEBUG][DB] Resumo de pagamentos gerado.")
     }

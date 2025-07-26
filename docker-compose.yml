@@ -3,7 +3,7 @@ services:
     image: ronssm/copirinhago:latest
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
     networks:
       - backend
       - payment-processor
@@ -24,7 +24,7 @@ services:
     image: ronssm/copirinhago:latest
     environment:
       - POSTGRES_CONN=postgres://user:password@db:5432/copirinha?sslmode=disable
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
     networks:
       - backend
       - payment-processor

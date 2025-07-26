@@ -3,7 +3,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS payments (
     correlation_id UUID NOT NULL,
     amount NUMERIC(18,2) NOT NULL,
     processor VARCHAR(16) NOT NULL,
-    requested_at TIMESTAMP NOT NULL
+    requested_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_correlation_id ON payments(correlation_id);
