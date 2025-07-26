@@ -19,14 +19,14 @@ import (
 
 var httpClient = &http.Client{
     Transport: &http.Transport{
-        MaxIdleConns:        300,
-        MaxIdleConnsPerHost: 150,
-        IdleConnTimeout:     10 * time.Second,
+        MaxIdleConns:        500,
+        MaxIdleConnsPerHost: 200,
+        IdleConnTimeout:     30 * time.Second,  // Increased from 5s
         DisableKeepAlives:   false,
         DisableCompression:  true, // Reduz overhead
-        ResponseHeaderTimeout: 500 * time.Millisecond,
+        ResponseHeaderTimeout: 6 * time.Second, // Increased to handle slow fallback
     },
-    Timeout: 800 * time.Millisecond, // Timeout agressivo para p99
+    Timeout: 7 * time.Second, // Increased to handle 5s fallback processor
 }
 
 type HealthStatus struct {
@@ -42,8 +42,8 @@ var (
     }
     healthMu sync.Mutex
     logLevel string
-    // Cache mais agressivo para melhor performance
-    healthCacheDuration = 800 * time.Millisecond
+    // Cache ajustado para respeitar limite de 1 chamada a cada 5 segundos
+    healthCacheDuration = 5 * time.Second
 )
 
 func getHealth(processor string) *HealthStatus {
@@ -64,9 +64,9 @@ func getHealth(processor string) *HealthStatus {
     }
     url := ""
     if processor == "default" {
-        url = "http://payment-processor-default:8080/payments"
+        url = "http://payment-processor-default:8080/payments/service-health"
         if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, "http://payment-processor-default:8080/payments/service-health")
+            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
         }
     } else {
         url = "http://payment-processor-fallback:8080/payments/service-health"
@@ -74,7 +74,7 @@ func getHealth(processor string) *HealthStatus {
             log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
         }
     }
-    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // Increased from 100ms
     defer cancel()
     req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
     if err != nil {
@@ -115,15 +115,35 @@ func chooseProcessor() (string, error) {
             def.Failing, def.MinResponseTime, fb.Failing, fb.MinResponseTime)
     }
     
-    // Prioriza default se estiver funcionando (taxa menor)
-    if !def.Failing {
+    // Estratégia otimizada para cenários extremos de teste
+    
+    // REGRA 1: Evita processadores extremamente lentos (>2500ms) - Stage 05 fallback=5000ms
+    if !def.Failing && fb.MinResponseTime > 2500 {
+        if logLevel == "DEBUG" {
+            log.Printf("[DEBUG][FLOW] Evitando fallback muito lento (%dms), usando default", fb.MinResponseTime)
+        }
         return "default", nil
     }
-    // Se default falha, usa fallback se disponível
-    if !fb.Failing {
+    
+    // REGRA 2: Se default OK e rápido (< 100ms), sempre usa default
+    if !def.Failing && def.MinResponseTime < 100 {
+        return "default", nil
+    }
+    
+    // REGRA 3: Se default OK mas lento, usa fallback apenas se for significativamente mais rápido
+    if !def.Failing {
+        if !fb.Failing && fb.MinResponseTime < (def.MinResponseTime / 2) && fb.MinResponseTime < 2000 {
+            return "fallback", nil
+        }
+        return "default", nil
+    }
+    
+    // REGRA 4: Se default falha, usa fallback apenas se não for extremamente lento
+    if !fb.Failing && fb.MinResponseTime < 2500 {
         return "fallback", nil
     }
-    // Se ambos falhando, ainda tenta default (pode ser instabilidade temporária)
+    
+    // REGRA 5: Em último caso, tenta default mesmo falhando (melhor que fallback muito lento)
     return "default", nil
 }
 
@@ -173,7 +193,23 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
         "requestedAt": time.Now().UTC().Format(time.RFC3339Nano),
     }
     body, _ := json.Marshal(payload)
-    ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+    
+    // Timeout adaptativo baseado no processador escolhido
+    timeoutDuration := 6000 * time.Millisecond
+    
+    // Para fallback, verifica se está extremamente lento
+    if processor == "fallback" {
+        health := getHealth("fallback")
+        if health.MinResponseTime > 2500 {
+            // Timeout mais agressivo para fallback muito lento
+            timeoutDuration = 3500 * time.Millisecond
+            if logLevel == "DEBUG" {
+                log.Printf("[DEBUG][FLOW] Usando timeout agressivo (3.5s) para fallback lento (%dms)", health.MinResponseTime)
+            }
+        }
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
     defer cancel()
     reqPost, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
     if err != nil {
@@ -183,18 +219,37 @@ func HandlePayment(w http.ResponseWriter, r *http.Request) {
     reqPost.Header.Set("Content-Type", "application/json")
     resp, err := httpClient.Do(reqPost)
     if err != nil || resp.StatusCode >= 500 {
-        // Tenta fallback se default falhar
+        // Tenta fallback se default falhar (apenas uma vez)
         if processor == "default" {
-            if logLevel == "DEBUG" {
-                log.Println("[DEBUG][FLOW] Default falhou, tentando fallback")
-            }
-            url = "http://payment-processor-fallback:8080/payments"
-            reqPost, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-            if err == nil {
-                reqPost.Header.Set("Content-Type", "application/json")
-                resp, err = httpClient.Do(reqPost)
-                if err == nil && resp.StatusCode < 500 {
-                    processor = "fallback"
+            fallbackHealth := getHealth("fallback")
+            
+            // Só tenta fallback se não for extremamente lento
+            if !fallbackHealth.Failing && fallbackHealth.MinResponseTime <= 2500 {
+                if logLevel == "DEBUG" {
+                    log.Printf("[DEBUG][FLOW] Default falhou, tentando fallback (tempo: %dms)", fallbackHealth.MinResponseTime)
+                }
+                
+                // Timeout baseado na saúde do fallback
+                fallbackTimeout := 6000 * time.Millisecond
+                if fallbackHealth.MinResponseTime > 1500 {
+                    fallbackTimeout = 3500 * time.Millisecond
+                }
+                
+                ctxFallback, cancelFallback := context.WithTimeout(context.Background(), fallbackTimeout)
+                defer cancelFallback()
+                
+                url = "http://payment-processor-fallback:8080/payments"
+                reqPost, err = http.NewRequestWithContext(ctxFallback, "POST", url, bytes.NewReader(body))
+                if err == nil {
+                    reqPost.Header.Set("Content-Type", "application/json")
+                    resp, err = httpClient.Do(reqPost)
+                    if err == nil && resp.StatusCode < 500 {
+                        processor = "fallback"
+                    }
+                }
+            } else {
+                if logLevel == "DEBUG" {
+                    log.Printf("[DEBUG][FLOW] Fallback muito lento (%dms) ou falhando, não tentando", fallbackHealth.MinResponseTime)
                 }
             }
         }

@@ -22,20 +22,48 @@ func InitDB(connStr string) error {
     if logLevel == "" {
         logLevel = "INFO" // Recomenda INFO para produção
     }
+    
+    // Adiciona parâmetros de timeout à string de conexão
+    if !strings.Contains(connStr, "?") {
+        connStr += "?"
+    } else {
+        connStr += "&"
+    }
+    connStr += "statement_timeout=2000&lock_timeout=1000&idle_in_transaction_session_timeout=5000"
+    
     var err error
     DB, err = sql.Open("postgres", connStr)
     if err != nil {
         log.Printf("[ERROR][DB] Falha ao abrir conexão: %v", err)
         return err
     }
-    // Otimização do pool de conexões para máxima performance
-    DB.SetMaxOpenConns(100)
-    DB.SetMaxIdleConns(50)
-    DB.SetConnMaxLifetime(60 * time.Second) // 1 minuto
-    DB.SetConnMaxIdleTime(10 * time.Second)  // 10 segundos idle
+    
+    // Pool otimizado para não exceder max_connections do PostgreSQL
+    DB.SetMaxOpenConns(40)   // 40 por instância = 80 total (< 150 configurado)
+    DB.SetMaxIdleConns(20)   // Metade do max_open
+    DB.SetConnMaxLifetime(30 * time.Second) // 30 segundos
+    DB.SetConnMaxIdleTime(10 * time.Second) // 10 segundos idle
+    
     if logLevel == "DEBUG" {
-        log.Println("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=50, MaxIdleConns=25, MaxLifetime=5min.")
+        log.Printf("[DEBUG][DB] Pool de conexões ajustado: MaxOpenConns=40, MaxIdleConns=20, MaxLifetime=30s")
     }
+    
+    // Configura parâmetros por sessão para performance
+    _, err = DB.Exec("SET work_mem = '4MB'")
+    if err != nil {
+        log.Printf("[WARN][DB] Não foi possível definir work_mem: %v", err)
+    }
+    
+    _, err = DB.Exec("SET synchronous_commit = off")
+    if err != nil {
+        log.Printf("[WARN][DB] Não foi possível definir synchronous_commit: %v", err)
+    }
+    
+    _, err = DB.Exec("SET random_page_cost = 1.1")
+    if err != nil {
+        log.Printf("[WARN][DB] Não foi possível definir random_page_cost: %v", err)
+    }
+    
     log.Println("[DEBUG][DB] Conexão aberta, testando ping...")
     if err := DB.Ping(); err != nil {
         log.Printf("[ERROR][DB] Falha no ping: %v", err)
