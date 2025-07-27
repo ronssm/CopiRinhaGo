@@ -1,37 +1,47 @@
 package handlers
 
 import (
-    "encoding/json"
-    "net/http"
+    "github.com/gofiber/fiber/v2"
+    "time"
     "CopiRinhaGo/db"
-    "log"
-    "os"
-    "strings"
 )
 
-func HandlePaymentsSummary(w http.ResponseWriter, r *http.Request) {
-    logLevel := strings.ToUpper(os.Getenv("LOG_LEVEL"))
-    if logLevel == "" {
-        logLevel = "DEBUG"
+func HandlePaymentsSummaryFiber(c *fiber.Ctx) error {
+    var fromTime, toTime *time.Time
+    
+    if fromStr := c.Query("from"); fromStr != "" {
+        if parsed, err := time.Parse(time.RFC3339, fromStr); err == nil {
+            fromTime = &parsed
+        } else {
+            return c.Status(400).JSON(fiber.Map{"error": "invalid 'from' time format, use RFC3339"})
+        }
     }
-    if logLevel == "DEBUG" {
-        log.Println("[DEBUG][API] Recebida chamada GET /payments-summary")
+    
+    if toStr := c.Query("to"); toStr != "" {
+        if parsed, err := time.Parse(time.RFC3339, toStr); err == nil {
+            toTime = &parsed
+        } else {
+            return c.Status(400).JSON(fiber.Map{"error": "invalid 'to' time format, use RFC3339"})
+        }
     }
-    from := r.URL.Query().Get("from")
-    to := r.URL.Query().Get("to")
-    if logLevel == "DEBUG" {
-        log.Printf("[DEBUG][API] Filtros recebidos: from=%s, to=%s", from, to)
+
+    if fromTime != nil && toTime != nil && fromTime.After(*toTime) {
+        return c.Status(400).JSON(fiber.Map{"error": "'from' time must be before 'to' time"})
     }
-    summary, err := db.GetPaymentsSummary(from, to)
+
+    summary, err := db.GetOverallPaymentsSummaryWithTimeRange(fromTime, toTime)
     if err != nil {
-        log.Printf("[ERROR][API] Erro ao obter resumo: %v", err)
-        http.Error(w, "summary error", http.StatusInternalServerError)
-        return
+        return c.JSON(map[string]interface{}{
+            "default": map[string]interface{}{
+                "totalRequests": 0,
+                "totalAmount":   0.0,
+            },
+            "fallback": map[string]interface{}{
+                "totalRequests": 0,
+                "totalAmount":   0.0,
+            },
+        })
     }
-    if logLevel == "DEBUG" {
-        log.Println("[DEBUG][API] Resumo obtido, enviando resposta.")
-    }
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(summary)
+
+    return c.JSON(summary)
 }

@@ -1,18 +1,21 @@
 {
-    "name": "Ronaldo Santana",
+    "name": "CopiRinhaGo Redis Ultra-Performance",
     "social": [
-        "https://www.linkedin.com/in/ronaldo-santana/"
+        "https://github.com/ronssm"
     ],
     "source-code-repo": "https://github.com/ronssm/CopiRinhaGo",
     "langs": [
         "go"
     ],
     "storages": [
-        "postgresql"
+        "redis"
     ],
     "messaging": [],
     "load-balancers": [
-        "nginx"
+        "haproxy"
     ],
-    "other-technologies": []
+    "other-technologies": [
+        "fiber",
+        "docker"
+    ]
 }

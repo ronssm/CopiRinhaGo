@@ -1,317 +1,401 @@
-
-
 package handlers
 
 import (
-    "encoding/json"
-    "net/http"
-    "sync"
-    "time"
-    "CopiRinhaGo/models"
-    "CopiRinhaGo/db"
     "bytes"
-    "errors"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "time"
+    "sync"
     "context"
-    "log"
-    "os"
-    "strings"
+    "math"
+    "github.com/gofiber/fiber/v2"
+    "CopiRinhaGo/db"
 )
 
 var httpClient = &http.Client{
     Transport: &http.Transport{
-        MaxIdleConns:        500,
-        MaxIdleConnsPerHost: 200,
-        IdleConnTimeout:     30 * time.Second,  // Increased from 5s
-        DisableKeepAlives:   false,
-        DisableCompression:  true, // Reduz overhead
-        ResponseHeaderTimeout: 6 * time.Second, // Increased to handle slow fallback
+        MaxIdleConns:          400,
+        MaxIdleConnsPerHost:   120,
+        IdleConnTimeout:       60 * time.Second,
+        DisableKeepAlives:     false,
+        DisableCompression:    true,
+        ResponseHeaderTimeout: 1200 * time.Millisecond,
+        TLSHandshakeTimeout:   800 * time.Millisecond,
+        ExpectContinueTimeout: 300 * time.Millisecond,
+        MaxConnsPerHost:       200,
+        WriteBufferSize:       16384,
+        ReadBufferSize:        16384,
     },
-    Timeout: 7 * time.Second, // Increased to handle 5s fallback processor
+    Timeout: 4 * time.Second,
+}
+
+type PaymentRequest struct {
+    CorrelationID string    `json:"correlationId"`
+    Amount        float64   `json:"amount"`
+}
+
+type PaymentProcessorRequest struct {
+    CorrelationID string    `json:"correlationId"`
+    Amount        float64   `json:"amount"`
+    RequestedAt   string    `json:"requestedAt"`
 }
 
 type HealthStatus struct {
+    Failing         bool `json:"failing"`
+    MinResponseTime int  `json:"minResponseTime"`
+}
+
+type HealthStatusWithTime struct {
     Failing         bool
     MinResponseTime int
     LastChecked     time.Time
 }
 
 var (
-    healthCache = map[string]*HealthStatus{
-        "default":  &HealthStatus{LastChecked: time.Time{}},
-        "fallback": &HealthStatus{LastChecked: time.Time{}},
+    healthCache = map[string]*HealthStatusWithTime{
+        "default":  &HealthStatusWithTime{LastChecked: time.Time{}},
+        "fallback": &HealthStatusWithTime{LastChecked: time.Time{}},
     }
-    healthMu sync.Mutex
-    logLevel string
-    // Cache ajustado para respeitar limite de 1 chamada a cada 5 segundos
-    healthCacheDuration = 5 * time.Second
+    healthMu sync.RWMutex
+    healthCacheDuration = 2 * time.Second
+    
+	circuitBreakers = map[string]*CircuitBreaker{
+		"default":  NewCircuitBreaker(12, 20*time.Second),
+		"fallback": NewCircuitBreaker(12, 20*time.Second),
+	}
+    processedRequests = make(map[string]time.Time)
+    deduplicationMu sync.RWMutex
+    deduplicationTTL = 5 * time.Minute
 )
 
-func getHealth(processor string) *HealthStatus {
-    if logLevel == "" {
-        logLevel = strings.ToUpper(os.Getenv("LOG_LEVEL"))
-        if logLevel == "" {
-            logLevel = "DEBUG"
-        }
-    }
-    healthMu.Lock()
-    defer healthMu.Unlock()
+type CircuitBreaker struct {
+    maxFailures   int
+    resetTimeout  time.Duration
+    mu           sync.RWMutex
+    failures     int
+    lastFailTime time.Time
+    state        CircuitState
+}
+
+type CircuitState int
+
+const (
+    CircuitClosed CircuitState = iota
+    CircuitOpen
+    CircuitHalfOpen
+)
+
+func getHealth(processor string) *HealthStatusWithTime {
+    healthMu.RLock()
     status := healthCache[processor]
-    if time.Since(status.LastChecked) < healthCacheDuration {
-        if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][HEALTH] Cache hit para %s", processor)
-        }
-        return status
-    }
-    url := ""
-    if processor == "default" {
-        url = "http://payment-processor-default:8080/payments/service-health"
-        if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
-        }
-    } else {
-        url = "http://payment-processor-fallback:8080/payments/service-health"
-        if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][HEALTH] Verificando health do processor %s: %s", processor, url)
-        }
-    }
-    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // Increased from 100ms
-    defer cancel()
-    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-    if err != nil {
-        status.Failing = true
-        status.LastChecked = time.Now()
-        return status
-    }
-    resp, err := httpClient.Do(req)
-    if err != nil {
-        status.Failing = true
-        status.LastChecked = time.Now()
+    lastChecked := status.LastChecked
+    healthMu.RUnlock()
+    
+    if time.Since(lastChecked) < healthCacheDuration {
         return status
     }
     
-    var hs struct {
-        Failing         bool `json:"failing"`
-        MinResponseTime int  `json:"minResponseTime"`
-    }
-    
-    if err := json.NewDecoder(resp.Body).Decode(&hs); err != nil {
-        status.Failing = true
-        status.LastChecked = time.Now()
-        return status
-    }
-    resp.Body.Close()
-    status.Failing = hs.Failing
-    status.MinResponseTime = hs.MinResponseTime
-    status.LastChecked = time.Now()
+    go checkHealth(processor)
     return status
 }
 
-func chooseProcessor() (string, error) {
-    def := getHealth("default")
-    fb := getHealth("fallback")
-    
-    if logLevel == "DEBUG" {
-        log.Printf("[DEBUG][FLOW] Health status - default: failing=%v, minTime=%d; fallback: failing=%v, minTime=%d", 
-            def.Failing, def.MinResponseTime, fb.Failing, fb.MinResponseTime)
+func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBreaker {
+    return &CircuitBreaker{
+        maxFailures:  maxFailures,
+        resetTimeout: resetTimeout,
+        state:       CircuitClosed,
     }
-    
-    // Estratégia otimizada para cenários extremos de teste
-    
-    // REGRA 1: Evita processadores extremamente lentos (>2500ms) - Stage 05 fallback=5000ms
-    if !def.Failing && fb.MinResponseTime > 2500 {
-        if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][FLOW] Evitando fallback muito lento (%dms), usando default", fb.MinResponseTime)
-        }
-        return "default", nil
-    }
-    
-    // REGRA 2: Se default OK e rápido (< 100ms), sempre usa default
-    if !def.Failing && def.MinResponseTime < 100 {
-        return "default", nil
-    }
-    
-    // REGRA 3: Se default OK mas lento, usa fallback apenas se for significativamente mais rápido
-    if !def.Failing {
-        if !fb.Failing && fb.MinResponseTime < (def.MinResponseTime / 2) && fb.MinResponseTime < 2000 {
-            return "fallback", nil
-        }
-        return "default", nil
-    }
-    
-    // REGRA 4: Se default falha, usa fallback apenas se não for extremamente lento
-    if !fb.Failing && fb.MinResponseTime < 2500 {
-        return "fallback", nil
-    }
-    
-    // REGRA 5: Em último caso, tenta default mesmo falhando (melhor que fallback muito lento)
-    return "default", nil
 }
 
-func HandlePayment(w http.ResponseWriter, r *http.Request) {
-    // Validação do payload
-    if logLevel == "" {
-        logLevel = strings.ToUpper(os.Getenv("LOG_LEVEL"))
-        if logLevel == "" {
-            logLevel = "DEBUG"
-        }
-    }
-    var req struct {
-        CorrelationID string  `json:"correlationId"`
-        Amount        float64 `json:"amount"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, "invalid request", http.StatusBadRequest)
-        return
-    }
-    // Valida se correlationId é UUID
-    if req.CorrelationID == "" || req.Amount <= 0 {
-        http.Error(w, "missing or invalid fields", http.StatusBadRequest)
-        return
-    }
-    if !isValidUUID(req.CorrelationID) {
-        http.Error(w, "correlationId must be a valid UUID", http.StatusBadRequest)
-        return
-    }
-    // Não verifica unicidade antes do insert, banco já garante
-    processor, err := chooseProcessor()
-    if err != nil {
-        // Se chegou aqui, ambos estão falhando, mas ainda tenta default
-        processor = "default"
-        if logLevel == "DEBUG" {
-            log.Println("[DEBUG][FLOW] Ambos processadores falhando, tentando default mesmo assim")
-        }
-    }
-    url := ""
-    if processor == "default" {
-        url = "http://payment-processor-default:8080/payments"
-    } else {
-        url = "http://payment-processor-fallback:8080/payments"
-    }
-    payload := map[string]interface{}{
-        "correlationId": req.CorrelationID,
-        "amount": req.Amount,
-        "requestedAt": time.Now().UTC().Format(time.RFC3339Nano),
-    }
-    body, _ := json.Marshal(payload)
+func (cb *CircuitBreaker) CanExecute() bool {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
     
-    // Timeout adaptativo baseado no processador escolhido
-    timeoutDuration := 6000 * time.Millisecond
-    
-    // Para fallback, verifica se está extremamente lento
-    if processor == "fallback" {
-        health := getHealth("fallback")
-        if health.MinResponseTime > 2500 {
-            // Timeout mais agressivo para fallback muito lento
-            timeoutDuration = 3500 * time.Millisecond
-            if logLevel == "DEBUG" {
-                log.Printf("[DEBUG][FLOW] Usando timeout agressivo (3.5s) para fallback lento (%dms)", health.MinResponseTime)
-            }
+    switch cb.state {
+    case CircuitClosed:
+        return true
+    case CircuitOpen:
+        if time.Since(cb.lastFailTime) > cb.resetTimeout {
+            cb.state = CircuitHalfOpen
+            return true
         }
-    }
-    
-    ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
-    defer cancel()
-    reqPost, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-    if err != nil {
-        http.Error(w, "Payment processor error", http.StatusServiceUnavailable)
-        return
-    }
-    reqPost.Header.Set("Content-Type", "application/json")
-    resp, err := httpClient.Do(reqPost)
-    if err != nil || resp.StatusCode >= 500 {
-        // Tenta fallback se default falhar (apenas uma vez)
-        if processor == "default" {
-            fallbackHealth := getHealth("fallback")
-            
-            // Só tenta fallback se não for extremamente lento
-            if !fallbackHealth.Failing && fallbackHealth.MinResponseTime <= 2500 {
-                if logLevel == "DEBUG" {
-                    log.Printf("[DEBUG][FLOW] Default falhou, tentando fallback (tempo: %dms)", fallbackHealth.MinResponseTime)
-                }
-                
-                // Timeout baseado na saúde do fallback
-                fallbackTimeout := 6000 * time.Millisecond
-                if fallbackHealth.MinResponseTime > 1500 {
-                    fallbackTimeout = 3500 * time.Millisecond
-                }
-                
-                ctxFallback, cancelFallback := context.WithTimeout(context.Background(), fallbackTimeout)
-                defer cancelFallback()
-                
-                url = "http://payment-processor-fallback:8080/payments"
-                reqPost, err = http.NewRequestWithContext(ctxFallback, "POST", url, bytes.NewReader(body))
-                if err == nil {
-                    reqPost.Header.Set("Content-Type", "application/json")
-                    resp, err = httpClient.Do(reqPost)
-                    if err == nil && resp.StatusCode < 500 {
-                        processor = "fallback"
-                    }
-                }
-            } else {
-                if logLevel == "DEBUG" {
-                    log.Printf("[DEBUG][FLOW] Fallback muito lento (%dms) ou falhando, não tentando", fallbackHealth.MinResponseTime)
-                }
-            }
-        }
-    }
-    
-    // Se ainda há erro após tentativas, retorna erro HTTP 503
-    if err != nil || resp.StatusCode >= 500 {
-        if logLevel == "DEBUG" {
-            log.Printf("[DEBUG][FLOW] Falha final em ambos processadores: err=%v, status=%d", err, 
-                func() int { 
-                    if resp != nil { 
-                        return resp.StatusCode 
-                    }
-                    return 0 
-                }())
-        }
-        http.Error(w, "Payment processor unavailable", http.StatusServiceUnavailable)
-        return
-    }
-    payment := &models.Payment{
-        CorrelationID: req.CorrelationID,
-        Amount:        req.Amount,
-        Processor:     processor,
-        RequestedAt:   payload["requestedAt"].(string),
-    }
-    // Tenta inserir pagamento de forma síncrona para tratar erro de unicidade
-    err = db.InsertPayment(payment)
-    if err != nil {
-        if errors.Is(err, db.ErrCorrelationIDExists) {
-            http.Error(w, "correlationId already used", http.StatusConflict)
-            return
-        }
-        log.Printf("[ERROR][PAYMENT] Falha ao inserir pagamento: %v", err)
-        http.Error(w, "Erro ao registrar pagamento", http.StatusInternalServerError)
-        return
-    }
-    if logLevel == "DEBUG" {
-        log.Println("[DEBUG][PAYMENT] Pagamento processado com sucesso.")
-    }
-    w.WriteHeader(http.StatusAccepted)
-}
-
-// Função para validar UUID
-func isValidUUID(u string) bool {
-    if len(u) != 36 {
+        return false
+    case CircuitHalfOpen:
+        return true
+    default:
         return false
     }
-    // Regex simples para UUID v4
-    for i, c := range u {
-        switch i {
-        case 8, 13, 18, 23:
-            if c != '-' {
-                return false
-            }
-        default:
-            if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-                return false
-            }
-        }
-    }
-    return true
 }
 
-// Removido: unicidade garantida pelo banco
+func (cb *CircuitBreaker) RecordSuccess() {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    
+    cb.failures = 0
+    cb.state = CircuitClosed
+}
 
+func (cb *CircuitBreaker) RecordFailure() {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    
+    cb.failures++
+    cb.lastFailTime = time.Now()
+    
+    if cb.state == CircuitHalfOpen {
+        cb.state = CircuitOpen
+    } else if cb.failures >= cb.maxFailures {
+        cb.state = CircuitOpen
+    }
+}
+
+func checkHealth(processor string) {
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    
+    url := fmt.Sprintf("http://payment-processor-%s:8080/payments/service-health", processor)
+    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    if err != nil {
+        healthMu.Lock()
+        status := healthCache[processor]
+        status.LastChecked = time.Now()
+        status.Failing = true
+        status.MinResponseTime = 9999
+        healthMu.Unlock()
+        return
+    }
+    
+    resp, err := httpClient.Do(req)
+    
+    healthMu.Lock()
+    defer healthMu.Unlock()
+    
+    status := healthCache[processor]
+    status.LastChecked = time.Now()
+    
+    if err != nil || resp.StatusCode != 200 {
+        status.Failing = true
+        status.MinResponseTime = 9999
+    } else {
+        var healthResp HealthStatus
+        if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
+            status.Failing = true
+            status.MinResponseTime = 9999
+        } else {
+            status.Failing = healthResp.Failing
+            status.MinResponseTime = healthResp.MinResponseTime
+        }
+        resp.Body.Close()
+    }
+}
+
+func selectProcessor() string {
+    defaultHealth := getHealth("default")
+    fallbackHealth := getHealth("fallback")
+    
+    defaultCB := circuitBreakers["default"]
+    fallbackCB := circuitBreakers["fallback"]
+    
+    defaultAvailable := !defaultHealth.Failing && defaultCB.CanExecute()
+    fallbackAvailable := !fallbackHealth.Failing && fallbackCB.CanExecute()
+    
+    if defaultAvailable {
+        if fallbackAvailable && defaultHealth.MinResponseTime > fallbackHealth.MinResponseTime+100 {
+            return "fallback"
+        }
+        return "default"
+    }
+    
+    if fallbackAvailable {
+        return "fallback"
+    }
+    
+    return "default"
+}
+
+func isDuplicateRequest(correlationID string) bool {
+    deduplicationMu.RLock()
+    lastProcessed, exists := processedRequests[correlationID]
+    deduplicationMu.RUnlock()
+    
+    if exists && time.Since(lastProcessed) < deduplicationTTL {
+        return true
+    }
+    
+    go cleanupDeduplicationCache()
+    
+    return false
+}
+
+func markRequestProcessed(correlationID string) {
+    deduplicationMu.Lock()
+    processedRequests[correlationID] = time.Now()
+    deduplicationMu.Unlock()
+}
+
+func cleanupDeduplicationCache() {
+    deduplicationMu.Lock()
+    defer deduplicationMu.Unlock()
+    
+    cutoff := time.Now().Add(-deduplicationTTL)
+    for id, timestamp := range processedRequests {
+        if timestamp.Before(cutoff) {
+            delete(processedRequests, id)
+        }
+    }
+}
+
+func retryWithExponentialBackoff(fn func() error, maxRetries int, initialDelay time.Duration) error {
+    var lastErr error
+    
+    for attempt := 0; attempt <= maxRetries; attempt++ {
+        if attempt > 0 {
+            delay := time.Duration(float64(initialDelay) * math.Pow(1.3, float64(attempt-1)))
+            if delay > 150*time.Millisecond {
+                delay = 150 * time.Millisecond
+            }
+            time.Sleep(delay)
+        }
+        
+        lastErr = fn()
+        if lastErr == nil {
+            return nil
+        }
+    }
+    
+    return lastErr
+}
+
+func processPayment(correlationID string, amount float64) (string, error) {
+    if correlationID == "" {
+        return "", fmt.Errorf("correlationId is required")
+    }
+    
+    if isDuplicateRequest(correlationID) {
+        return "duplicate", fmt.Errorf("duplicate request for correlationId: %s", correlationID)
+    }
+    
+    var lastErr error
+    var processorTried []string
+    
+    preferredOrder := []string{selectProcessor()}
+    if preferredOrder[0] == "default" {
+        preferredOrder = append(preferredOrder, "fallback")
+    } else {
+        preferredOrder = append(preferredOrder, "default")
+    }
+    
+    for _, processorType := range preferredOrder {
+        cb := circuitBreakers[processorType]
+        
+        if !cb.CanExecute() {
+            lastErr = fmt.Errorf("circuit breaker open for processor: %s", processorType)
+            processorTried = append(processorTried, processorType+" (circuit-open)")
+            continue
+        }
+        
+        err := retryWithExponentialBackoff(func() error {
+            return attemptPaymentProcessing(correlationID, amount, processorType)
+        }, 2, 10*time.Millisecond)
+        
+        if err == nil {
+            cb.RecordSuccess()
+            
+            payment := &db.Payment{
+                CorrelationID: correlationID,
+                Amount:        amount,
+                ProcessorType: processorType,
+                ProcessedAt:   time.Now(),
+            }
+            
+            storageErr := retryWithExponentialBackoff(func() error {
+                return db.StorePayment(payment)
+            }, 3, 8*time.Millisecond)
+            
+            if storageErr != nil {
+                return "", fmt.Errorf("payment processed but storage failed: %v", storageErr)
+            }
+            
+            markRequestProcessed(correlationID)
+            
+            return processorType, nil
+        }
+        
+        cb.RecordFailure()
+        lastErr = err
+        processorTried = append(processorTried, processorType)
+    }
+    
+    return "", fmt.Errorf("all payment processors failed (%v): %v", processorTried, lastErr)
+}
+
+func attemptPaymentProcessing(correlationID string, amount float64, processorType string) error {
+    paymentData := PaymentProcessorRequest{
+        CorrelationID: correlationID,
+        Amount:        amount,
+        RequestedAt:   time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+    }
+    
+    jsonData, err := json.Marshal(paymentData)
+    if err != nil {
+        return fmt.Errorf("json marshal error: %v", err)
+    }
+    
+    url := fmt.Sprintf("http://payment-processor-%s:8080/payments", processorType)
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 3200*time.Millisecond)
+    defer cancel()
+    
+    req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+    if err != nil {
+        return fmt.Errorf("request creation error: %v", err)
+    }
+    
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Connection", "keep-alive")
+    req.Header.Set("User-Agent", "CopiRinhaGo/1.0")
+    
+    resp, err := httpClient.Do(req)
+    if err != nil {
+        return fmt.Errorf("payment processing failed: %v", err)
+    }
+    defer resp.Body.Close()
+    
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        return fmt.Errorf("payment processing error: status %d", resp.StatusCode)
+    }
+    
+    return nil
+}
+
+func HandlePaymentFiber(c *fiber.Ctx) error {
+    var paymentRequest PaymentRequest
+    
+    if err := c.BodyParser(&paymentRequest); err != nil {
+        return c.Status(400).JSON(fiber.Map{"error": "invalid json"})
+    }
+
+    if paymentRequest.CorrelationID == "" {
+        return c.Status(400).JSON(fiber.Map{"error": "correlationId is required"})
+    }
+
+    if paymentRequest.Amount <= 0 {
+        return c.Status(400).JSON(fiber.Map{"error": "amount must be positive"})
+    }
+    
+    if paymentRequest.Amount > 1000000 {
+        return c.Status(400).JSON(fiber.Map{"error": "amount exceeds maximum limit"})
+    }
+
+    processorType, err := processPayment(paymentRequest.CorrelationID, paymentRequest.Amount)
+    if err != nil {
+        if processorType == "duplicate" {
+            return c.Status(409).JSON(fiber.Map{"error": "duplicate correlationId"})
+        }
+        
+        return c.Status(500).JSON(fiber.Map{"error": "payment processing failed"})
+    }
+
+    return c.Status(200).JSON(fiber.Map{"message": "payment processed successfully"})
+}
