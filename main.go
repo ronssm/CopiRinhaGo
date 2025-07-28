@@ -27,13 +27,13 @@ func main() {
         ServerHeader:  "",
         AppName:       "CopiRinhaGo",
         DisableKeepalive: false,
-        ReadTimeout:      2 * time.Second,
-        WriteTimeout:     2 * time.Second,
-        IdleTimeout:      30 * time.Second,
-        ReadBufferSize:  16384,
-        WriteBufferSize: 16384,
-        BodyLimit:       512,
-        Concurrency:     4096,
+        ReadTimeout:      1500 * time.Millisecond,
+        WriteTimeout:     1500 * time.Millisecond,
+        IdleTimeout:      60 * time.Second,
+        ReadBufferSize:  32768,
+        WriteBufferSize: 32768,
+        BodyLimit:       1024,
+        Concurrency:     8192,
         JSONEncoder: json.Marshal,
         JSONDecoder: json.Unmarshal,
         ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -52,7 +52,7 @@ func main() {
     }))
     
     app.Use(limiter.New(limiter.Config{
-        Max:        400,
+        Max:        600,
         Expiration: 1 * time.Second,
         KeyGenerator: func(c *fiber.Ctx) string {
             return c.IP()

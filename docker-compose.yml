@@ -2,6 +2,7 @@ services:
   backend1:
     build: .
     image: copirinhago-local:latest
+    pull_policy: always
     environment:
       - REDIS_CONN=redis:6379
       - LOG_LEVEL=ERROR
@@ -20,11 +21,12 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
-          memory: "80MB"
+          cpus: "0.5"
+          memory: "90MB"
   backend2:
     build: .
     image: copirinhago-local:latest
+    pull_policy: always
     environment:
       - REDIS_CONN=redis:6379
       - LOG_LEVEL=ERROR
@@ -43,10 +45,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
-          memory: "80MB"
+          cpus: "0.5"
+          memory: "90MB"
   haproxy:
     image: haproxy:2.8-alpine
+    pull_policy: always
     depends_on:
       - backend1
       - backend2
@@ -64,11 +67,12 @@ services:
           memory: "15MB"
   redis:
     image: redis:7-alpine
+    pull_policy: always
     ports:
       - "6379:6379"
     networks:
       - backend
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --timeout 0
+    command: redis-server --maxmemory 120mb --maxmemory-policy allkeys-lru --tcp-keepalive 60 --timeout 0
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -78,8 +82,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 175M
-          cpus: '0.6'
+          memory: 140M
+          cpus: '0.4'
 networks:
   backend:
     driver: bridge

@@ -15,19 +15,20 @@ import (
 
 var httpClient = &http.Client{
     Transport: &http.Transport{
-        MaxIdleConns:          400,
-        MaxIdleConnsPerHost:   120,
-        IdleConnTimeout:       60 * time.Second,
+        MaxIdleConns:          800,
+        MaxIdleConnsPerHost:   200,
+        IdleConnTimeout:       90 * time.Second,
         DisableKeepAlives:     false,
         DisableCompression:    true,
-        ResponseHeaderTimeout: 1200 * time.Millisecond,
-        TLSHandshakeTimeout:   800 * time.Millisecond,
-        ExpectContinueTimeout: 300 * time.Millisecond,
-        MaxConnsPerHost:       200,
-        WriteBufferSize:       16384,
-        ReadBufferSize:        16384,
+        ResponseHeaderTimeout: 800 * time.Millisecond,
+        TLSHandshakeTimeout:   500 * time.Millisecond,
+        ExpectContinueTimeout: 200 * time.Millisecond,
+        MaxConnsPerHost:       300,
+        WriteBufferSize:       32768,
+        ReadBufferSize:        32768,
+        ForceAttemptHTTP2:     false,
     },
-    Timeout: 4 * time.Second,
+    Timeout: 2500 * time.Millisecond,
 }
 
 type PaymentRequest struct {
@@ -58,11 +59,11 @@ var (
         "fallback": &HealthStatusWithTime{LastChecked: time.Time{}},
     }
     healthMu sync.RWMutex
-    healthCacheDuration = 2 * time.Second
+    healthCacheDuration = 1500 * time.Millisecond
     
 	circuitBreakers = map[string]*CircuitBreaker{
-		"default":  NewCircuitBreaker(12, 20*time.Second),
-		"fallback": NewCircuitBreaker(12, 20*time.Second),
+		"default":  NewCircuitBreaker(8, 10*time.Second),
+		"fallback": NewCircuitBreaker(8, 10*time.Second),
 	}
     processedRequests = make(map[string]time.Time)
     deduplicationMu sync.RWMutex
@@ -297,7 +298,7 @@ func processPayment(correlationID string, amount float64) (string, error) {
         
         err := retryWithExponentialBackoff(func() error {
             return attemptPaymentProcessing(correlationID, amount, processorType)
-        }, 2, 10*time.Millisecond)
+        }, 1, 15*time.Millisecond)
         
         if err == nil {
             cb.RecordSuccess()
@@ -311,7 +312,7 @@ func processPayment(correlationID string, amount float64) (string, error) {
             
             storageErr := retryWithExponentialBackoff(func() error {
                 return db.StorePayment(payment)
-            }, 3, 8*time.Millisecond)
+            }, 2, 5*time.Millisecond)
             
             if storageErr != nil {
                 return "", fmt.Errorf("payment processed but storage failed: %v", storageErr)
@@ -344,7 +345,7 @@ func attemptPaymentProcessing(correlationID string, amount float64, processorTyp
     
     url := fmt.Sprintf("http://payment-processor-%s:8080/payments", processorType)
     
-    ctx, cancel := context.WithTimeout(context.Background(), 3200*time.Millisecond)
+    ctx, cancel := context.WithTimeout(context.Background(), 2000*time.Millisecond)
     defer cancel()
     
     req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
