@@ -31,15 +31,15 @@ func Init() error {
 		Addr:            redisConn,
 		Password:        "",
 		DB:              0,
-		PoolSize:        250,
-		MinIdleConns:    30,
-		MaxRetries:      5,
-		DialTimeout:     800 * time.Millisecond,
-		ReadTimeout:     500 * time.Millisecond,
-		WriteTimeout:    500 * time.Millisecond,
-		PoolTimeout:     800 * time.Millisecond,
-		IdleTimeout:     90 * time.Second,
-		MaxConnAge:      15 * time.Minute,
+		PoolSize:        400,     // Higher pool for challenge load
+		MinIdleConns:    50,      // More idle connections ready
+		MaxRetries:      3,       // Fewer retries for speed
+		DialTimeout:     400 * time.Millisecond, // Faster connection
+		ReadTimeout:     200 * time.Millisecond, // Ultra-fast reads
+		WriteTimeout:    300 * time.Millisecond, // Fast writes
+		PoolTimeout:     500 * time.Millisecond, // Faster pool timeout
+		IdleTimeout:     60 * time.Second,       // Shorter idle timeout
+		MaxConnAge:      10 * time.Minute,       // Refresh connections more often
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)

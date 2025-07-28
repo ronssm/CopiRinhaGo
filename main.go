@@ -27,15 +27,16 @@ func main() {
         ServerHeader:  "",
         AppName:       "CopiRinhaGo",
         DisableKeepalive: false,
-        ReadTimeout:      1500 * time.Millisecond,
-        WriteTimeout:     1500 * time.Millisecond,
-        IdleTimeout:      60 * time.Second,
-        ReadBufferSize:  32768,
-        WriteBufferSize: 32768,
-        BodyLimit:       1024,
-        Concurrency:     8192,
+        ReadTimeout:      800 * time.Millisecond,  // Ultra-fast timeouts for P99 optimization
+        WriteTimeout:     800 * time.Millisecond,
+        IdleTimeout:      30 * time.Second,        // Shorter idle timeout  
+        ReadBufferSize:  65536,                    // Larger buffers for performance
+        WriteBufferSize: 65536,
+        BodyLimit:       2048,                     // Larger body limit for safety
+        Concurrency:     12288,                    // Higher concurrency for challenge load
         JSONEncoder: json.Marshal,
         JSONDecoder: json.Unmarshal,
+        DisableStartupMessage: true,               // Reduce startup overhead
         ErrorHandler: func(c *fiber.Ctx, err error) error {
             code := fiber.StatusInternalServerError
             if e, ok := err.(*fiber.Error); ok {
@@ -52,7 +53,7 @@ func main() {
     }))
     
     app.Use(limiter.New(limiter.Config{
-        Max:        600,
+        Max:        800,  // Higher rate limit for challenge performance
         Expiration: 1 * time.Second,
         KeyGenerator: func(c *fiber.Ctx) string {
             return c.IP()
@@ -62,6 +63,7 @@ func main() {
                 "error": "Rate limit exceeded",
             })
         },
+        SkipFailedRequests: true, // Don't count failed requests toward limit
     }))
     
     app.Get("/health", func(c *fiber.Ctx) error {

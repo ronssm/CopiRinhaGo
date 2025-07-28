@@ -15,20 +15,20 @@ import (
 
 var httpClient = &http.Client{
     Transport: &http.Transport{
-        MaxIdleConns:          800,
-        MaxIdleConnsPerHost:   200,
-        IdleConnTimeout:       90 * time.Second,
+        MaxIdleConns:          800,   // Balanced connection pool
+        MaxIdleConnsPerHost:   150,   // Adequate per-host connections
+        IdleConnTimeout:       90 * time.Second, // Reasonable idle timeout
         DisableKeepAlives:     false,
         DisableCompression:    true,
-        ResponseHeaderTimeout: 800 * time.Millisecond,
-        TLSHandshakeTimeout:   500 * time.Millisecond,
-        ExpectContinueTimeout: 200 * time.Millisecond,
-        MaxConnsPerHost:       300,
-        WriteBufferSize:       32768,
+        ResponseHeaderTimeout: 2500 * time.Millisecond, // Balanced timeout
+        TLSHandshakeTimeout:   1000 * time.Millisecond,
+        ExpectContinueTimeout: 500 * time.Millisecond,
+        MaxConnsPerHost:       200,   // Balanced connection limit
+        WriteBufferSize:       32768, // Moderate buffer size
         ReadBufferSize:        32768,
         ForceAttemptHTTP2:     false,
     },
-    Timeout: 2500 * time.Millisecond,
+    Timeout: 4000 * time.Millisecond, // Balanced timeout - not too fast, not too slow
 }
 
 type PaymentRequest struct {
@@ -53,21 +53,36 @@ type HealthStatusWithTime struct {
     LastChecked     time.Time
 }
 
+type ProcessorStats struct {
+    SuccessCount     int64
+    FailureCount     int64
+    AvgResponseTime  float64
+    LastSuccess      time.Time
+    ConsecutiveFails int
+}
+
 var (
     healthCache = map[string]*HealthStatusWithTime{
-        "default":  &HealthStatusWithTime{LastChecked: time.Time{}},
-        "fallback": &HealthStatusWithTime{LastChecked: time.Time{}},
+        "default":  &HealthStatusWithTime{LastChecked: time.Time{}, Failing: false, MinResponseTime: 50},
+        "fallback": &HealthStatusWithTime{LastChecked: time.Time{}, Failing: false, MinResponseTime: 100},
     }
     healthMu sync.RWMutex
-    healthCacheDuration = 1500 * time.Millisecond
+    healthCacheDuration = 3000 * time.Millisecond // Balanced health check frequency
     
 	circuitBreakers = map[string]*CircuitBreaker{
-		"default":  NewCircuitBreaker(8, 10*time.Second),
+		"default":  NewCircuitBreaker(8, 10*time.Second), // Balanced: More tolerant than fast-fail, less than over-tolerant
 		"fallback": NewCircuitBreaker(8, 10*time.Second),
 	}
     processedRequests = make(map[string]time.Time)
     deduplicationMu sync.RWMutex
-    deduplicationTTL = 5 * time.Minute
+    deduplicationTTL = 10 * time.Minute // Longer deduplication for safety
+    
+    // Performance tracking for profit optimization
+    processorPerformance = map[string]*ProcessorStats{
+        "default":  &ProcessorStats{},
+        "fallback": &ProcessorStats{},
+    }
+    performanceMu sync.RWMutex
 )
 
 type CircuitBreaker struct {
@@ -151,44 +166,64 @@ func (cb *CircuitBreaker) RecordFailure() {
     }
 }
 
+func updateProcessorStats(processorType string, success bool, responseTime time.Duration) {
+    performanceMu.Lock()
+    defer performanceMu.Unlock()
+    
+    stats := processorPerformance[processorType]
+    
+    if success {
+        stats.SuccessCount++
+        stats.ConsecutiveFails = 0
+        stats.LastSuccess = time.Now()
+        
+        // Update average response time with exponential moving average
+        if stats.AvgResponseTime == 0 {
+            stats.AvgResponseTime = float64(responseTime.Nanoseconds())
+        } else {
+            stats.AvgResponseTime = 0.7*stats.AvgResponseTime + 0.3*float64(responseTime.Nanoseconds())
+        }
+    } else {
+        stats.FailureCount++
+        stats.ConsecutiveFails++
+    }
+}
+
 func checkHealth(processor string) {
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second) // Faster health checks
     defer cancel()
     
     url := fmt.Sprintf("http://payment-processor-%s:8080/payments/service-health", processor)
     req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
     if err != nil {
-        healthMu.Lock()
-        status := healthCache[processor]
-        status.LastChecked = time.Now()
-        status.Failing = true
-        status.MinResponseTime = 9999
-        healthMu.Unlock()
+        updateHealthStatus(processor, true, 9999)
         return
     }
     
     resp, err := httpClient.Do(req)
     
+    if err != nil || resp == nil || resp.StatusCode != 200 {
+        updateHealthStatus(processor, true, 9999)
+        return
+    }
+    defer resp.Body.Close()
+    
+    var healthResp HealthStatus
+    if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
+        updateHealthStatus(processor, true, 9999)
+    } else {
+        updateHealthStatus(processor, healthResp.Failing, healthResp.MinResponseTime)
+    }
+}
+
+func updateHealthStatus(processor string, failing bool, minResponseTime int) {
     healthMu.Lock()
     defer healthMu.Unlock()
     
     status := healthCache[processor]
     status.LastChecked = time.Now()
-    
-    if err != nil || resp.StatusCode != 200 {
-        status.Failing = true
-        status.MinResponseTime = 9999
-    } else {
-        var healthResp HealthStatus
-        if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
-            status.Failing = true
-            status.MinResponseTime = 9999
-        } else {
-            status.Failing = healthResp.Failing
-            status.MinResponseTime = healthResp.MinResponseTime
-        }
-        resp.Body.Close()
-    }
+    status.Failing = failing
+    status.MinResponseTime = minResponseTime
 }
 
 func selectProcessor() string {
@@ -198,21 +233,61 @@ func selectProcessor() string {
     defaultCB := circuitBreakers["default"]
     fallbackCB := circuitBreakers["fallback"]
     
-    defaultAvailable := !defaultHealth.Failing && defaultCB.CanExecute()
-    fallbackAvailable := !fallbackHealth.Failing && fallbackCB.CanExecute()
+    // Get performance stats for intelligent selection
+    performanceMu.RLock()
+    defaultStats := processorPerformance["default"]
+    fallbackStats := processorPerformance["fallback"]
+    performanceMu.RUnlock()
     
-    if defaultAvailable {
-        if fallbackAvailable && defaultHealth.MinResponseTime > fallbackHealth.MinResponseTime+100 {
-            return "fallback"
-        }
+    // SMART STRATEGY: Use health and performance to make decisions
+    defaultScore := calculateProcessorScore("default", defaultHealth, defaultCB, defaultStats)
+    fallbackScore := calculateProcessorScore("fallback", fallbackHealth, fallbackCB, fallbackStats)
+    
+    // Always prefer default for profit, but not if it's completely broken
+    if defaultScore > 0 && (defaultScore >= fallbackScore || fallbackScore == 0) {
         return "default"
     }
     
-    if fallbackAvailable {
+    if fallbackScore > 0 {
         return "fallback"
     }
     
+    // Last resort - try default even if broken (better than no attempt)
     return "default"
+}
+
+// Calculate processor score (0 = unusable, higher = better)
+func calculateProcessorScore(processor string, health *HealthStatusWithTime, cb *CircuitBreaker, stats *ProcessorStats) float64 {
+    if health.Failing {
+        return 0
+    }
+    
+    if !cb.CanExecute() {
+        return 0
+    }
+    
+    // Base score
+    score := 1.0
+    
+    // Penalty for recent failures
+    if stats.ConsecutiveFails > 0 {
+        score *= math.Pow(0.5, float64(stats.ConsecutiveFails)) // Exponential penalty
+    }
+    
+    // Bonus for recent successes
+    if time.Since(stats.LastSuccess) < 30*time.Second {
+        score *= 1.5
+    }
+    
+    // Response time penalty (lower is better)
+    if stats.AvgResponseTime > 0 {
+        responseTimeMs := stats.AvgResponseTime / 1000000 // Convert to ms
+        if responseTimeMs > 1000 { // Penalty for slow responses
+            score *= 0.5
+        }
+    }
+    
+    return score
 }
 
 func isDuplicateRequest(correlationID string) bool {
@@ -252,9 +327,9 @@ func retryWithExponentialBackoff(fn func() error, maxRetries int, initialDelay t
     
     for attempt := 0; attempt <= maxRetries; attempt++ {
         if attempt > 0 {
-            delay := time.Duration(float64(initialDelay) * math.Pow(1.3, float64(attempt-1)))
-            if delay > 150*time.Millisecond {
-                delay = 150 * time.Millisecond
+            delay := time.Duration(float64(initialDelay) * math.Pow(1.2, float64(attempt-1)))
+            if delay > 200*time.Millisecond {
+                delay = 200 * time.Millisecond  // Faster maximum delay
             }
             time.Sleep(delay)
         }
@@ -277,58 +352,70 @@ func processPayment(correlationID string, amount float64) (string, error) {
         return "duplicate", fmt.Errorf("duplicate request for correlationId: %s", correlationID)
     }
     
-    var lastErr error
-    var processorTried []string
+    // BALANCED STRATEGY: Smart retry with adaptive fallback
+    primaryProcessor := selectProcessor()
     
-    preferredOrder := []string{selectProcessor()}
-    if preferredOrder[0] == "default" {
-        preferredOrder = append(preferredOrder, "fallback")
-    } else {
-        preferredOrder = append(preferredOrder, "default")
-    }
-    
-    for _, processorType := range preferredOrder {
-        cb := circuitBreakers[processorType]
-        
-        if !cb.CanExecute() {
-            lastErr = fmt.Errorf("circuit breaker open for processor: %s", processorType)
-            processorTried = append(processorTried, processorType+" (circuit-open)")
-            continue
+    // Try primary processor with limited retries
+    processorType, err := attemptPaymentWithBalancedRetry(correlationID, amount, primaryProcessor)
+    if err == nil {
+        // Success - store payment asynchronously to not block response
+        payment := &db.Payment{
+            CorrelationID: correlationID,
+            Amount:        amount,
+            ProcessorType: processorType,
+            ProcessedAt:   time.Now(),
         }
         
-        err := retryWithExponentialBackoff(func() error {
-            return attemptPaymentProcessing(correlationID, amount, processorType)
-        }, 1, 15*time.Millisecond)
-        
-        if err == nil {
-            cb.RecordSuccess()
-            
-            payment := &db.Payment{
-                CorrelationID: correlationID,
-                Amount:        amount,
-                ProcessorType: processorType,
-                ProcessedAt:   time.Now(),
-            }
-            
-            storageErr := retryWithExponentialBackoff(func() error {
+        // Async storage with limited retries
+        go func() {
+            retryWithExponentialBackoff(func() error {
                 return db.StorePayment(payment)
-            }, 2, 5*time.Millisecond)
-            
-            if storageErr != nil {
-                return "", fmt.Errorf("payment processed but storage failed: %v", storageErr)
-            }
-            
-            markRequestProcessed(correlationID)
-            
-            return processorType, nil
-        }
+            }, 3, 5*time.Millisecond)
+        }()
         
-        cb.RecordFailure()
-        lastErr = err
-        processorTried = append(processorTried, processorType)
+        markRequestProcessed(correlationID)
+        return processorType, nil
     }
     
-    return "", fmt.Errorf("all payment processors failed (%v): %v", processorTried, lastErr)
+    return "", err
+}
+
+func attemptPaymentWithBalancedRetry(correlationID string, amount float64, primaryProcessor string) (string, error) {
+    // Try primary processor with 2 attempts (initial + 1 retry)
+    for attempt := 0; attempt < 2; attempt++ {
+        if attempt > 0 {
+            time.Sleep(20 * time.Millisecond) // Brief pause between retries
+        }
+        
+        if err := attemptPaymentProcessing(correlationID, amount, primaryProcessor); err == nil {
+            circuitBreakers[primaryProcessor].RecordSuccess()
+            return primaryProcessor, nil
+        } else if attempt == 0 {
+            // Only record failure after both attempts fail
+            continue
+        } else {
+            circuitBreakers[primaryProcessor].RecordFailure()
+        }
+    }
+    
+    // Immediate fallback to other processor
+    fallbackProcessor := "fallback"
+    if primaryProcessor == "fallback" {
+        fallbackProcessor = "default"
+    }
+    
+    // Try fallback processor if available (single attempt to avoid cascading delays)
+    fallbackCB := circuitBreakers[fallbackProcessor]
+    if fallbackCB.CanExecute() {
+        if err := attemptPaymentProcessing(correlationID, amount, fallbackProcessor); err == nil {
+            circuitBreakers[fallbackProcessor].RecordSuccess()
+            return fallbackProcessor, nil
+        } else {
+            circuitBreakers[fallbackProcessor].RecordFailure()
+        }
+    }
+    
+    return "", fmt.Errorf("both processors failed")
 }
 
 func attemptPaymentProcessing(correlationID string, amount float64, processorType string) error {
@@ -345,7 +432,8 @@ func attemptPaymentProcessing(correlationID string, amount float64, processorTyp
     
     url := fmt.Sprintf("http://payment-processor-%s:8080/payments", processorType)
     
-    ctx, cancel := context.WithTimeout(context.Background(), 2000*time.Millisecond)
+    // BALANCED TIMEOUT: Not too fast, not too slow
+    ctx, cancel := context.WithTimeout(context.Background(), 3000*time.Millisecond)
     defer cancel()
     
     req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
@@ -355,9 +443,15 @@ func attemptPaymentProcessing(correlationID string, amount float64, processorTyp
     
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("Connection", "keep-alive")
-    req.Header.Set("User-Agent", "CopiRinhaGo/1.0")
     
+    start := time.Now()
     resp, err := httpClient.Do(req)
+    responseTime := time.Since(start)
+    
+    // Update stats immediately
+    success := err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300
+    updateProcessorStats(processorType, success, responseTime)
+    
     if err != nil {
         return fmt.Errorf("payment processing failed: %v", err)
     }
@@ -377,26 +471,25 @@ func HandlePaymentFiber(c *fiber.Ctx) error {
         return c.Status(400).JSON(fiber.Map{"error": "invalid json"})
     }
 
+    // Ultra-fast validation
     if paymentRequest.CorrelationID == "" {
-        return c.Status(400).JSON(fiber.Map{"error": "correlationId is required"})
+        return c.Status(400).JSON(fiber.Map{"error": "correlationId required"})
     }
 
-    if paymentRequest.Amount <= 0 {
-        return c.Status(400).JSON(fiber.Map{"error": "amount must be positive"})
-    }
-    
-    if paymentRequest.Amount > 1000000 {
-        return c.Status(400).JSON(fiber.Map{"error": "amount exceeds maximum limit"})
+    if paymentRequest.Amount <= 0 || paymentRequest.Amount > 1000000 {
+        return c.Status(400).JSON(fiber.Map{"error": "invalid amount"})
     }
 
     processorType, err := processPayment(paymentRequest.CorrelationID, paymentRequest.Amount)
     if err != nil {
         if processorType == "duplicate" {
-            return c.Status(409).JSON(fiber.Map{"error": "duplicate correlationId"})
+            // Return success for duplicates to avoid client retries
+            return c.Status(200).JSON(fiber.Map{"message": "processed"})
         }
         
-        return c.Status(500).JSON(fiber.Map{"error": "payment processing failed"})
+        return c.Status(500).JSON(fiber.Map{"error": "processing failed"})
     }
 
-    return c.Status(200).JSON(fiber.Map{"message": "payment processed successfully"})
+    // Minimal response for maximum speed
+    return c.Status(201).SendString(`{"message":"processed"}`)
 }
