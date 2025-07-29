@@ -83,7 +83,40 @@ var (
         "fallback": &ProcessorStats{},
     }
     performanceMu sync.RWMutex
+    
+    // OPTIMIZATION #5: Memory-Optimized Request Batching
+    batchQueue = make(chan *BatchRequest, 2000) // Large buffer for batching
+    batchPool sync.Pool
+    responsePool sync.Pool
 )
+
+type BatchRequest struct {
+    CorrelationID string
+    Amount        float64
+    ResponseChan  chan BatchResponse
+    Timestamp     time.Time
+}
+
+type BatchResponse struct {
+    ProcessorType string
+    Error         error
+}
+
+func init() {
+    // Initialize object pools for memory efficiency
+    batchPool.New = func() interface{} {
+        return &BatchRequest{}
+    }
+    
+    responsePool.New = func() interface{} {
+        return make(chan BatchResponse, 1)
+    }
+    
+    // Start batch processors
+    for i := 0; i < 8; i++ { // Multiple workers for parallel processing
+        go batchProcessor()
+    }
+}
 
 type CircuitBreaker struct {
     maxFailures   int
@@ -343,6 +376,87 @@ func retryWithExponentialBackoff(fn func() error, maxRetries int, initialDelay t
     return lastErr
 }
 
+func batchProcessor() {
+    batch := make([]*BatchRequest, 0, 20) // Pre-allocate for efficiency
+    ticker := time.NewTicker(5 * time.Millisecond) // Fast batching interval
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case req := <-batchQueue:
+            batch = append(batch, req)
+            
+            // Process immediately if batch is large enough or if single urgent request
+            if len(batch) >= 15 || (len(batch) == 1 && time.Since(req.Timestamp) > 10*time.Millisecond) {
+                processBatch(batch)
+                batch = batch[:0] // Reset slice efficiently
+            }
+            
+        case <-ticker.C:
+            if len(batch) > 0 {
+                processBatch(batch)
+                batch = batch[:0] // Reset slice efficiently
+            }
+        }
+    }
+}
+
+func processBatch(batch []*BatchRequest) {
+    if len(batch) == 0 {
+        return
+    }
+    
+    // Group by optimal processor selection
+    processor := selectProcessor()
+    
+    // Process batch in parallel sub-groups for better throughput
+    batchSize := len(batch)
+    if batchSize <= 5 {
+        // Small batch - process sequentially for low latency
+        for _, req := range batch {
+            go processSingleRequest(req, processor)
+        }
+    } else {
+        // Large batch - parallel processing
+        numWorkers := min(4, (batchSize+2)/3) // Optimize worker count
+        chunkSize := (batchSize + numWorkers - 1) / numWorkers
+        
+        for i := 0; i < numWorkers; i++ {
+            start := i * chunkSize
+            end := min(start+chunkSize, batchSize)
+            
+            go func(requests []*BatchRequest) {
+                for _, req := range requests {
+                    processSingleRequest(req, processor)
+                }
+            }(batch[start:end])
+        }
+    }
+}
+
+func processSingleRequest(req *BatchRequest, processor string) {
+    defer func() {
+        // Return objects to pool for memory efficiency
+        responsePool.Put(req.ResponseChan)
+        batchPool.Put(req)
+    }()
+    
+    processorType, err := attemptPaymentWithBalancedRetry(req.CorrelationID, req.Amount, processor)
+    
+    select {
+    case req.ResponseChan <- BatchResponse{ProcessorType: processorType, Error: err}:
+    default:
+        // Channel full or closed - request likely timed out
+    }
+}
+
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
 func processPayment(correlationID string, amount float64) (string, error) {
     if correlationID == "" {
         return "", fmt.Errorf("correlationId is required")
@@ -352,7 +466,54 @@ func processPayment(correlationID string, amount float64) (string, error) {
         return "duplicate", fmt.Errorf("duplicate request for correlationId: %s", correlationID)
     }
     
-    // BALANCED STRATEGY: Smart retry with adaptive fallback
+    // OPTIMIZATION #5: Use memory-optimized batching
+    req := batchPool.Get().(*BatchRequest)
+    req.CorrelationID = correlationID
+    req.Amount = amount
+    req.ResponseChan = responsePool.Get().(chan BatchResponse)
+    req.Timestamp = time.Now()
+    
+    // Try to queue request for batching
+    select {
+    case batchQueue <- req:
+        // Successfully queued - wait for response with timeout
+        select {
+        case response := <-req.ResponseChan:
+            if response.Error == nil {
+                // Success - store payment asynchronously
+                payment := &db.Payment{
+                    CorrelationID: correlationID,
+                    Amount:        amount,
+                    ProcessorType: response.ProcessorType,
+                    ProcessedAt:   time.Now(),
+                }
+                
+                go func() {
+                    retryWithExponentialBackoff(func() error {
+                        return db.StorePayment(payment)
+                    }, 3, 5*time.Millisecond)
+                }()
+                
+                markRequestProcessed(correlationID)
+                return response.ProcessorType, nil
+            }
+            return "", response.Error
+            
+        case <-time.After(4 * time.Second): // Generous timeout for batched processing
+            return "", fmt.Errorf("batch processing timeout")
+        }
+        
+    default:
+        // Queue full - fallback to direct processing
+        responsePool.Put(req.ResponseChan)
+        batchPool.Put(req)
+        
+        return processPaymentDirect(correlationID, amount)
+    }
+}
+
+func processPaymentDirect(correlationID string, amount float64) (string, error) {
+    // BALANCED STRATEGY: Smart retry with adaptive fallback (original logic)
     primaryProcessor := selectProcessor()
     
     // Try primary processor with limited retries
