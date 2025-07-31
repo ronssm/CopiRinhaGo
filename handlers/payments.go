@@ -88,6 +88,12 @@ var (
     batchQueue = make(chan *BatchRequest, 2000) // Large buffer for batching
     batchPool sync.Pool
     responsePool sync.Pool
+    
+    // OPTIMIZATION #6: Goroutine Worker Pools  
+    requestWorkerPool = make(chan *WorkerRequest, 500) // Worker pool for processing
+    dbStorageQueue = make(chan *db.Payment, 200) // Batch DB operations
+    healthCheckTicker = time.NewTicker(500 * time.Millisecond) // Controlled health checks
+    cleanupTicker = time.NewTicker(30 * time.Second) // Controlled cleanup
 )
 
 type BatchRequest struct {
@@ -100,6 +106,11 @@ type BatchRequest struct {
 type BatchResponse struct {
     ProcessorType string
     Error         error
+}
+
+type WorkerRequest struct {
+    BatchReq  *BatchRequest
+    Processor string
 }
 
 func init() {
@@ -116,6 +127,21 @@ func init() {
     for i := 0; i < 8; i++ { // Multiple workers for parallel processing
         go batchProcessor()
     }
+    
+    // OPTIMIZATION #6: Start fixed worker pools
+    // Start request worker pool (16 workers for processing requests)
+    for i := 0; i < 16; i++ {
+        go requestWorker()
+    }
+    
+    // Start DB batch worker
+    go dbBatchWorker()
+    
+    // Start singleton health checker
+    go healthCheckWorker()
+    
+    // Start singleton cleanup worker
+    go cleanupWorker()
 }
 
 type CircuitBreaker struct {
@@ -141,12 +167,12 @@ func getHealth(processor string) *HealthStatusWithTime {
     lastChecked := status.LastChecked
     healthMu.RUnlock()
     
+    // Don't spawn goroutines - health check manager handles this
     if time.Since(lastChecked) < healthCacheDuration {
         return status
     }
     
-    go checkHealth(processor)
-    return status
+    return status // Return cached status, manager will update async
 }
 
 func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBreaker {
@@ -332,8 +358,7 @@ func isDuplicateRequest(correlationID string) bool {
         return true
     }
     
-    go cleanupDeduplicationCache()
-    
+    // Don't spawn cleanup goroutine - cleanup manager handles this
     return false
 }
 
@@ -409,27 +434,19 @@ func processBatch(batch []*BatchRequest) {
     // Group by optimal processor selection
     processor := selectProcessor()
     
-    // Process batch in parallel sub-groups for better throughput
-    batchSize := len(batch)
-    if batchSize <= 5 {
-        // Small batch - process sequentially for low latency
-        for _, req := range batch {
-            go processSingleRequest(req, processor)
+    // Use worker pool instead of spawning unlimited goroutines
+    for _, req := range batch {
+        workerReq := &WorkerRequest{
+            BatchReq:  req,
+            Processor: processor,
         }
-    } else {
-        // Large batch - parallel processing
-        numWorkers := min(4, (batchSize+2)/3) // Optimize worker count
-        chunkSize := (batchSize + numWorkers - 1) / numWorkers
         
-        for i := 0; i < numWorkers; i++ {
-            start := i * chunkSize
-            end := min(start+chunkSize, batchSize)
-            
-            go func(requests []*BatchRequest) {
-                for _, req := range requests {
-                    processSingleRequest(req, processor)
-                }
-            }(batch[start:end])
+        select {
+        case requestWorkerPool <- workerReq:
+            // Successfully queued for worker processing
+        default:
+            // Worker pool full - process directly to avoid blocking
+            go processSingleRequest(req, processor)
         }
     }
 }
@@ -480,7 +497,7 @@ func processPayment(correlationID string, amount float64) (string, error) {
         select {
         case response := <-req.ResponseChan:
             if response.Error == nil {
-                // Success - store payment asynchronously
+                // Success - queue for batch DB storage instead of spawning goroutine
                 payment := &db.Payment{
                     CorrelationID: correlationID,
                     Amount:        amount,
@@ -488,11 +505,17 @@ func processPayment(correlationID string, amount float64) (string, error) {
                     ProcessedAt:   time.Now(),
                 }
                 
-                go func() {
-                    retryWithExponentialBackoff(func() error {
-                        return db.StorePayment(payment)
-                    }, 3, 5*time.Millisecond)
-                }()
+                select {
+                case dbStorageQueue <- payment:
+                    // Successfully queued for batch storage
+                default:
+                    // Queue full - store directly (fallback)
+                    go func(p *db.Payment) {
+                        retryWithExponentialBackoff(func() error {
+                            return db.StorePayment(p)
+                        }, 2, 5*time.Millisecond) // Reduced retries
+                    }(payment)
+                }
                 
                 markRequestProcessed(correlationID)
                 return response.ProcessorType, nil
@@ -519,7 +542,7 @@ func processPaymentDirect(correlationID string, amount float64) (string, error) 
     // Try primary processor with limited retries
     processorType, err := attemptPaymentWithBalancedRetry(correlationID, amount, primaryProcessor)
     if err == nil {
-        // Success - store payment asynchronously to not block response
+        // Success - queue for batch DB storage instead of spawning goroutine
         payment := &db.Payment{
             CorrelationID: correlationID,
             Amount:        amount,
@@ -527,12 +550,17 @@ func processPaymentDirect(correlationID string, amount float64) (string, error) 
             ProcessedAt:   time.Now(),
         }
         
-        // Async storage with limited retries
-        go func() {
-            retryWithExponentialBackoff(func() error {
-                return db.StorePayment(payment)
-            }, 3, 5*time.Millisecond)
-        }()
+        select {
+        case dbStorageQueue <- payment:
+            // Successfully queued for batch storage
+        default:
+            // Queue full - store directly (fallback)
+            go func(p *db.Payment) {
+                retryWithExponentialBackoff(func() error {
+                    return db.StorePayment(p)
+                }, 2, 5*time.Millisecond) // Reduced retries
+            }(payment)
+        }
         
         markRequestProcessed(correlationID)
         return processorType, nil
@@ -653,4 +681,107 @@ func HandlePaymentFiber(c *fiber.Ctx) error {
 
     // Minimal response for maximum speed
     return c.Status(201).SendString(`{"message":"processed"}`)
+}
+
+// OPTIMIZATION #6: Worker Pool Functions for Controlled Goroutine Usage
+
+// Fixed worker pool for request processing (replaces unlimited goroutine spawning)
+func requestWorker() {
+    for workerReq := range requestWorkerPool {
+        processSingleRequest(workerReq.BatchReq, workerReq.Processor)
+    }
+}
+
+// Batch DB storage worker (replaces goroutine per payment)
+func dbBatchWorker() {
+    batch := make([]*db.Payment, 0, 10) // Small batch for quick processing
+    ticker := time.NewTicker(50 * time.Millisecond) // Fast DB batch interval
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case payment := <-dbStorageQueue:
+            batch = append(batch, payment)
+            
+            // Process when batch is ready or single urgent payment
+            if len(batch) >= 5 { // Small batch size for low latency
+                storeBatch(batch)
+                batch = batch[:0]
+            }
+            
+        case <-ticker.C:
+            if len(batch) > 0 {
+                storeBatch(batch)
+                batch = batch[:0]
+            }
+        }
+    }
+}
+
+// Store multiple payments efficiently
+func storeBatch(payments []*db.Payment) {
+    for _, payment := range payments {
+        // Use reduced retry count to avoid blocking
+        retryWithExponentialBackoff(func() error {
+            return db.StorePayment(payment)
+        }, 2, 5*time.Millisecond)
+    }
+}
+
+// Single health check manager (replaces goroutine per health check)
+func healthCheckManager() {
+    ticker := time.NewTicker(1500 * time.Millisecond) // Check every 1.5s
+    defer ticker.Stop()
+    
+    processors := []string{"default", "fallback"}
+    
+    for {
+        select {
+        case <-ticker.C:
+            for _, processor := range processors {
+                healthMu.RLock()
+                lastChecked := healthCache[processor].LastChecked
+                healthMu.RUnlock()
+                
+                if time.Since(lastChecked) >= healthCacheDuration {
+                    checkHealth(processor) // Direct call, no goroutine
+                }
+            }
+        }
+    }
+}
+
+// Single cleanup manager (replaces goroutine per cleanup call)
+func cleanupManager() {
+    ticker := time.NewTicker(30 * time.Second) // Clean every 30 seconds
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ticker.C:
+            cleanupDeduplicationCache() // Direct call, no goroutine
+        }
+    }
+}
+
+// healthCheckWorker: Singleton worker for health checks
+func healthCheckWorker() {
+    for {
+        select {
+        case <-healthCheckTicker.C:
+            // Check health for both processors periodically
+            go checkHealth("default")  // Use minimal goroutines for network calls
+            go checkHealth("fallback")
+        }
+    }
+}
+
+// cleanupWorker: Singleton worker for cleanup operations
+func cleanupWorker() {
+    for {
+        select {
+        case <-cleanupTicker.C:
+            cleanupDeduplicationCache() // Direct call, no goroutine
+        }
+    }
 }
