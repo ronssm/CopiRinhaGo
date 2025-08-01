@@ -2,58 +2,79 @@ package stats
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"CopiRinhaGo/pkg/models"
 	"github.com/shopspring/decimal"
 )
 
+type PaymentRecord struct {
+	CorrelationID string
+	Amount        decimal.Decimal
+	ProcessorType string
+	Timestamp     time.Time
+}
+
 type PaymentStats struct {
-	mu                 sync.RWMutex
-	defaultRequests    int64   // Use atomic for better performance
-	fallbackRequests   int64   // Use atomic for better performance
-	defaultAmount      decimal.Decimal
-	fallbackAmount     decimal.Decimal
+	mu       sync.RWMutex
+	payments []PaymentRecord
 }
 
 var globalStats = &PaymentStats{
-	defaultRequests:  0,
-	fallbackRequests: 0,
-	defaultAmount:    decimal.Zero,
-	fallbackAmount:   decimal.Zero,
+	payments: make([]PaymentRecord, 0),
 }
 
 func RecordPayment(correlationID string, amount decimal.Decimal, processorType string) {
-	if processorType == "default" {
-		atomic.AddInt64(&globalStats.defaultRequests, 1)
-		globalStats.mu.Lock()
-		globalStats.defaultAmount = globalStats.defaultAmount.Add(amount)
-		globalStats.mu.Unlock()
-	} else if processorType == "fallback" {
-		atomic.AddInt64(&globalStats.fallbackRequests, 1)
-		globalStats.mu.Lock()
-		globalStats.fallbackAmount = globalStats.fallbackAmount.Add(amount)
-		globalStats.mu.Unlock()
+	globalStats.mu.Lock()
+	defer globalStats.mu.Unlock()
+	
+	record := PaymentRecord{
+		CorrelationID: correlationID,
+		Amount:        amount,
+		ProcessorType: processorType,
+		Timestamp:     time.Now(),
 	}
+	
+	globalStats.payments = append(globalStats.payments, record)
 }
 
 func GetPaymentsSummary(start, end time.Time) *models.PaymentsSummaryResponse {
 	globalStats.mu.RLock()
 	defer globalStats.mu.RUnlock()
 
+	defaultRequests := 0
+	fallbackRequests := 0
+	defaultAmount := decimal.Zero
+	fallbackAmount := decimal.Zero
+
+	for _, payment := range globalStats.payments {
+		includePayment := start.IsZero() || payment.Timestamp.After(start) || payment.Timestamp.Equal(start)
+		
+		if includePayment && (payment.Timestamp.Before(end) || payment.Timestamp.Equal(end)) {
+			if payment.ProcessorType == "default" {
+				defaultRequests++
+				defaultAmount = defaultAmount.Add(payment.Amount)
+			} else if payment.ProcessorType == "fallback" {
+				fallbackRequests++
+				fallbackAmount = fallbackAmount.Add(payment.Amount)
+			}
+		}
+	}
+
 	return &models.PaymentsSummaryResponse{
 		Default: models.PaymentsSummary{
-			TotalRequests: int(atomic.LoadInt64(&globalStats.defaultRequests)),
-			TotalAmount:   globalStats.defaultAmount,
+			TotalRequests: defaultRequests,
+			TotalAmount:   defaultAmount,
 		},
 		Fallback: models.PaymentsSummary{
-			TotalRequests: int(atomic.LoadInt64(&globalStats.fallbackRequests)),
-			TotalAmount:   globalStats.fallbackAmount,
+			TotalRequests: fallbackRequests,
+			TotalAmount:   fallbackAmount,
 		},
 	}
 }
 
 func GetPaymentsCount() int {
-	return int(atomic.LoadInt64(&globalStats.defaultRequests)) + int(atomic.LoadInt64(&globalStats.fallbackRequests))
+	globalStats.mu.RLock()
+	defer globalStats.mu.RUnlock()
+	return len(globalStats.payments)
 }

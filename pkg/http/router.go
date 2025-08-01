@@ -24,15 +24,15 @@ func NewRouter(paymentHandler *handler.PaymentHandler) *Router {
 		JSONDecoder:              json.Unmarshal,
 		Prefork:                  false,
 		DisableKeepalive:         false,
-		ReadTimeout:              800 * time.Millisecond,  // More reasonable timeout
-		WriteTimeout:             800 * time.Millisecond,  // More reasonable timeout
-		IdleTimeout:              10 * time.Second,        // Reasonable idle timeout
-		ReadBufferSize:          131072,  // 128KB buffer
-		WriteBufferSize:         131072,  // 128KB buffer
+		ReadTimeout:              1200 * time.Millisecond,
+		WriteTimeout:             1200 * time.Millisecond,
+		IdleTimeout:              10 * time.Second,
+		ReadBufferSize:          131072,
+		WriteBufferSize:         131072,
 		BodyLimit:               1024,
-		Concurrency:             65536,   // Increased concurrency
+		Concurrency:             65536,
 		DisableStartupMessage:    true,
-		ReduceMemoryUsage:        true,   // Enable memory optimization
+		ReduceMemoryUsage:        true,
 	})
 
 	return &Router{
@@ -41,7 +41,6 @@ func NewRouter(paymentHandler *handler.PaymentHandler) *Router {
 	}
 }
 
-// Object pool for payment requests
 var paymentPool = sync.Pool{
 	New: func() any {
 		return &models.PaymentRequest{}
@@ -53,7 +52,6 @@ func getPaymentFromPool() *models.PaymentRequest {
 }
 
 func putPaymentToPool(payment *models.PaymentRequest) {
-	// Reset the payment object before returning to pool
 	payment.CorrelationID = ""
 	payment.Amount = decimal.Zero
 	payment.RequestedAt = time.Time{}
@@ -61,13 +59,8 @@ func putPaymentToPool(payment *models.PaymentRequest) {
 }
 
 func (r *Router) RegisterRoutes() {
-	// Health check route
 	r.App.Get("/health", r.HealthCheck)
-
-	// Payment request route
 	r.App.Post("/payments", r.PaymentRequest)
-
-	// Payments summary route
 	r.App.Get("/payments-summary", r.PaymentsSummary)
 }
 
@@ -100,7 +93,33 @@ func (r *Router) PaymentRequest(c *fiber.Ctx) error {
 }
 
 func (r *Router) PaymentsSummary(c *fiber.Ctx) error {
-	summary, err := r.Handler.HandlePaymentsSummary(time.Time{}, time.Now())
+	fromStr := c.Query("from")
+	toStr := c.Query("to")
+	
+	var start, end time.Time
+	var err error
+	
+	if fromStr != "" {
+		start, err = time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid 'from' timestamp format, expected RFC3339",
+			})
+		}
+	}
+	
+	if toStr != "" {
+		end, err = time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid 'to' timestamp format, expected RFC3339",
+			})
+		}
+	} else {
+		end = time.Now()
+	}
+
+	summary, err := r.Handler.HandlePaymentsSummary(start, end)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to get summary",
