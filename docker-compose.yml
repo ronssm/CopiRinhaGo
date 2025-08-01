@@ -1,9 +1,7 @@
 services:
   backend1:
     build: .
-    image: copirinhago-local:latest
-    environment:
-      - LOG_LEVEL=ERROR
+    hostname: backend1
     networks:
       - backend
       - payment-processor
@@ -18,11 +16,10 @@ services:
         limits:
           cpus: "0.5"
           memory: "90MB"
+
   backend2:
     build: .
-    image: copirinhago-local:latest
-    environment:
-      - LOG_LEVEL=ERROR
+    hostname: backend2
     networks:
       - backend
       - payment-processor
@@ -37,6 +34,7 @@ services:
         limits:
           cpus: "0.5"
           memory: "90MB"
+
   haproxy:
     image: haproxy:2.8-alpine
     depends_on:
@@ -48,12 +46,12 @@ services:
       - "9999:9999"
     networks:
       - backend
-    restart: always
     deploy:
       resources:
         limits:
-          cpus: "0.1"
-          memory: "15MB"
+          cpus: "0.4"
+          memory: "70MB"
+
 networks:
   backend:
     driver: bridge
