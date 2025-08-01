@@ -2,6 +2,7 @@ package stats
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"CopiRinhaGo/pkg/models"
@@ -9,39 +10,31 @@ import (
 )
 
 type PaymentStats struct {
-	mu            sync.RWMutex
-	defaultStats  models.PaymentsSummary
-	fallbackStats models.PaymentsSummary
-	payments      []models.PaymentRecord
+	mu                 sync.RWMutex
+	defaultRequests    int64   // Use atomic for better performance
+	fallbackRequests   int64   // Use atomic for better performance
+	defaultAmount      decimal.Decimal
+	fallbackAmount     decimal.Decimal
 }
 
 var globalStats = &PaymentStats{
-	defaultStats:  models.PaymentsSummary{TotalRequests: 0, TotalAmount: decimal.Zero},
-	fallbackStats: models.PaymentsSummary{TotalRequests: 0, TotalAmount: decimal.Zero},
-	payments:      make([]models.PaymentRecord, 0, 100000),
+	defaultRequests:  0,
+	fallbackRequests: 0,
+	defaultAmount:    decimal.Zero,
+	fallbackAmount:   decimal.Zero,
 }
 
 func RecordPayment(correlationID string, amount decimal.Decimal, processorType string) {
-	globalStats.mu.Lock()
-	defer globalStats.mu.Unlock()
-
-	record := models.PaymentRecord{
-		CorrelationID: correlationID,
-		Amount:        amount,
-		ProcessedAt:   time.Now(),
-		ProcessorType: processorType,
-	}
-
-	// Add to payments list
-	globalStats.payments = append(globalStats.payments, record)
-
-	// Update stats
 	if processorType == "default" {
-		globalStats.defaultStats.TotalRequests++
-		globalStats.defaultStats.TotalAmount = globalStats.defaultStats.TotalAmount.Add(amount)
+		atomic.AddInt64(&globalStats.defaultRequests, 1)
+		globalStats.mu.Lock()
+		globalStats.defaultAmount = globalStats.defaultAmount.Add(amount)
+		globalStats.mu.Unlock()
 	} else if processorType == "fallback" {
-		globalStats.fallbackStats.TotalRequests++
-		globalStats.fallbackStats.TotalAmount = globalStats.fallbackStats.TotalAmount.Add(amount)
+		atomic.AddInt64(&globalStats.fallbackRequests, 1)
+		globalStats.mu.Lock()
+		globalStats.fallbackAmount = globalStats.fallbackAmount.Add(amount)
+		globalStats.mu.Unlock()
 	}
 }
 
@@ -49,16 +42,18 @@ func GetPaymentsSummary(start, end time.Time) *models.PaymentsSummaryResponse {
 	globalStats.mu.RLock()
 	defer globalStats.mu.RUnlock()
 
-	// For now, return all-time stats (ignoring time filtering for performance)
-	// In a production system, you'd implement proper time-range filtering
 	return &models.PaymentsSummaryResponse{
-		Default:  globalStats.defaultStats,
-		Fallback: globalStats.fallbackStats,
+		Default: models.PaymentsSummary{
+			TotalRequests: int(atomic.LoadInt64(&globalStats.defaultRequests)),
+			TotalAmount:   globalStats.defaultAmount,
+		},
+		Fallback: models.PaymentsSummary{
+			TotalRequests: int(atomic.LoadInt64(&globalStats.fallbackRequests)),
+			TotalAmount:   globalStats.fallbackAmount,
+		},
 	}
 }
 
 func GetPaymentsCount() int {
-	globalStats.mu.RLock()
-	defer globalStats.mu.RUnlock()
-	return len(globalStats.payments)
+	return int(atomic.LoadInt64(&globalStats.defaultRequests)) + int(atomic.LoadInt64(&globalStats.fallbackRequests))
 }

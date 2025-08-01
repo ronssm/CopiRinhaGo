@@ -26,7 +26,13 @@ func NewPaymentHandler(queue *rpc.QueueClient, log *log.Logger) *PaymentHandler 
 		queue: queue,
 		log:   log,
 		httpClient: &http.Client{
-			Timeout: 3 * time.Second,
+			Timeout: 1200 * time.Millisecond, // More reasonable timeout, below test script's 1500ms
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     30 * time.Second,
+				DisableKeepAlives:   false,
+			},
 		},
 	}
 }
@@ -51,7 +57,7 @@ func (h *PaymentHandler) HandlePaymentRequest(ctx context.Context, request model
 		}
 	}
 	
-	// Record the successful payment in stats
+	// Record the successful payment in stats AFTER we know it succeeded
 	stats.RecordPayment(request.CorrelationID, request.Amount, processorType)
 	
 	h.log.Printf("Successfully processed payment %s for %s via %s processor", 

@@ -24,14 +24,15 @@ func NewRouter(paymentHandler *handler.PaymentHandler) *Router {
 		JSONDecoder:              json.Unmarshal,
 		Prefork:                  false,
 		DisableKeepalive:         false,
-		ReadTimeout:              200 * time.Millisecond,
-		WriteTimeout:             200 * time.Millisecond,
-		IdleTimeout:              15 * time.Second,
-		ReadBufferSize:          32768,
-		WriteBufferSize:         32768,
+		ReadTimeout:              800 * time.Millisecond,  // More reasonable timeout
+		WriteTimeout:             800 * time.Millisecond,  // More reasonable timeout
+		IdleTimeout:              10 * time.Second,        // Reasonable idle timeout
+		ReadBufferSize:          131072,  // 128KB buffer
+		WriteBufferSize:         131072,  // 128KB buffer
 		BodyLimit:               1024,
-		Concurrency:             20480,
+		Concurrency:             65536,   // Increased concurrency
 		DisableStartupMessage:    true,
+		ReduceMemoryUsage:        true,   // Enable memory optimization
 	})
 
 	return &Router{
